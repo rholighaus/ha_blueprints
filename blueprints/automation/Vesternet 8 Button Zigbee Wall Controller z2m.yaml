@@ -1,0 +1,169 @@
+blueprint:
+  name: Vesternet 8-Button Zigbee Wall Controller (Z2M 2.0 Event Model)
+  description: >
+    Handles the Vesternet 8-Button Zigbee Wall Controller via the new
+    Zigbee2MQTT 2.0 `event.*` entity system.  Each button press, hold,
+    or release is detected from the entity’s `event_type` attribute.
+  domain: automation
+  author: Ralf Holighaus
+
+  input:
+    wall_controller_event:
+      name: Wall Controller Event Entity
+      description: >
+        Select the Zigbee2MQTT event entity for this controller
+        (e.g. `event.vesternet_8button_action`).
+      selector:
+        entity:
+          domain: event
+
+    # Button 1 inputs
+    on_button_1:
+      name: Button 1 On Press
+      default: []
+      selector: {action: {}}
+    off_button_1:
+      name: Button 1 Off Press
+      default: []
+      selector: {action: {}}
+    on_button_1_hold:
+      name: Button 1 On Hold
+      default: []
+      selector: {action: {}}
+    off_button_1_hold:
+      name: Button 1 Off Hold
+      default: []
+      selector: {action: {}}
+    button_1_release:
+      name: Button 1 Release
+      default: []
+      selector: {action: {}}
+
+    # Button 2 inputs
+    on_button_2:
+      name: Button 2 On Press
+      default: []
+      selector: {action: {}}
+    off_button_2:
+      name: Button 2 Off Press
+      default: []
+      selector: {action: {}}
+    on_button_2_hold:
+      name: Button 2 On Hold
+      default: []
+      selector: {action: {}}
+    off_button_2_hold:
+      name: Button 2 Off Hold
+      default: []
+      selector: {action: {}}
+    button_2_release:
+      name: Button 2 Release
+      default: []
+      selector: {action: {}}
+
+    # Button 3 inputs
+    on_button_3:
+      name: Button 3 On Press
+      default: []
+      selector: {action: {}}
+    off_button_3:
+      name: Button 3 Off Press
+      default: []
+      selector: {action: {}}
+    on_button_3_hold:
+      name: Button 3 On Hold
+      default: []
+      selector: {action: {}}
+    off_button_3_hold:
+      name: Button 3 Off Hold
+      default: []
+      selector: {action: {}}
+    button_3_release:
+      name: Button 3 Release
+      default: []
+      selector: {action: {}}
+
+    # Button 4 inputs
+    on_button_4:
+      name: Button 4 On Press
+      default: []
+      selector: {action: {}}
+    off_button_4:
+      name: Button 4 Off Press
+      default: []
+      selector: {action: {}}
+    on_button_4_hold:
+      name: Button 4 On Hold
+      default: []
+      selector: {action: {}}
+    off_button_4_hold:
+      name: Button 4 Off Hold
+      default: []
+      selector: {action: {}}
+    button_4_release:
+      name: Button 4 Release
+      default: []
+      selector: {action: {}}
+
+mode: single
+
+trigger:
+  - platform: state
+    entity_id: !input wall_controller_event
+    not_from: "unavailable"
+    not_to: "unavailable"
+
+condition: []
+
+action:
+  - variables:
+      evt: "{{ trigger.to_state.attributes.event_type | default('') }}"
+
+  - choose:
+      # --- Button 1 ---
+      - conditions: "{{ evt == 'on_1' }}"
+        sequence: !input on_button_1
+      - conditions: "{{ evt == 'off_1' }}"
+        sequence: !input off_button_1
+      - conditions: "{{ evt == 'brightness_move_up_1' }}"
+        sequence: !input on_button_1_hold
+      - conditions: "{{ evt == 'brightness_move_down_1' }}"
+        sequence: !input off_button_1_hold
+      - conditions: "{{ evt == 'brightness_stop_1' or evt == 'stop_1' }}"
+        sequence: !input button_1_release
+
+      # --- Button 2 ---
+      - conditions: "{{ evt == 'on_2' }}"
+        sequence: !input on_button_2
+      - conditions: "{{ evt == 'off_2' }}"
+        sequence: !input off_button_2
+      - conditions: "{{ evt == 'brightness_move_up_2' }}"
+        sequence: !input on_button_2_hold
+      - conditions: "{{ evt == 'brightness_move_down_2' }}"
+        sequence: !input off_button_2_hold
+      - conditions: "{{ evt == 'brightness_stop_2' or evt == 'stop_2' }}"
+        sequence: !input button_2_release
+
+      # --- Button 3 ---
+      - conditions: "{{ evt == 'on_3' }}"
+        sequence: !input on_button_3
+      - conditions: "{{ evt == 'off_3' }}"
+        sequence: !input off_button_3
+      - conditions: "{{ evt == 'brightness_move_up_3' }}"
+        sequence: !input on_button_3_hold
+      - conditions: "{{ evt == 'brightness_move_down_3' }}"
+        sequence: !input off_button_3_hold
+      - conditions: "{{ evt == 'brightness_stop_3' or evt == 'stop_3' }}"
+        sequence: !input button_3_release
+
+      # --- Button 4 ---
+      - conditions: "{{ evt == 'on_4' }}"
+        sequence: !input on_button_4
+      - conditions: "{{ evt == 'off_4' }}"
+        sequence: !input off_button_4
+      - conditions: "{{ evt == 'brightness_move_up_4' }}"
+        sequence: !input on_button_4_hold
+      - conditions: "{{ evt == 'brightness_move_down_4' }}"
+        sequence: !input off_button_4_hold
+      - conditions: "{{ evt == 'brightness_stop_4' or evt == 'stop_4' }}"
+        sequence: !input button_4_release
