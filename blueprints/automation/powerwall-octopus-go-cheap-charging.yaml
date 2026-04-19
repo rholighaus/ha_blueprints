@@ -5,6 +5,8 @@ blueprint:
     current Octopus rate is cheaper than the next rate. Automatically constructs
     and controls each site's backup-reserve number and grid-charge switch.
   domain: automation
+  author: "Ralf Holighaus"
+  source_url: "https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/powerwall-octopus-go-cheap-charging.yaml"
   input:
     current_rate_entity:
       name: Current rate entity

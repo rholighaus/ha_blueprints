@@ -20,6 +20,7 @@ blueprint:
 
   domain: automation
   author: "Ralf Holighaus / Claude"
+  source_url: "https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/charge-powerwall-when-throttling.yaml"
   input:
     dispatch_switch:
       name: "Load Dispatch Switch"

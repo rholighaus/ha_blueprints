@@ -37,6 +37,8 @@ blueprint:
     💡 Tip: Use shorter start timers (e.g. 60 s) and longer stop timers (e.g. 120 s) for best results in cloudy climates.
 
   domain: automation
+  author: "Ralf Holighaus"
+  source_url: "https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/warp-solar-excess-charging.yaml"
   input:
     grid_power_sensor:
       name: Grid Power Sensor (total, or single phase if 1φ)
