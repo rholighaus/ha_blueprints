@@ -42,8 +42,8 @@ blueprint:
       The blueprint will be updated to accept a secondary inverter at that point.
 
   domain: automation
-  author: Ralf Holighaus / Claude
-
+  author: "Ralf Holighaus / Claude"
+  source_url: "https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/Goodwe%20g100%20throttle.yaml"
   input:
     shell_command_service:
       name: Shell Command Service Name

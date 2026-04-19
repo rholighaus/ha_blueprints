@@ -5,8 +5,8 @@ blueprint:
     Zigbee2MQTT 2.0 `event.*` entity system.  Each button press, hold,
     or release is detected from the entity’s `event_type` attribute.
   domain: automation
-  author: Ralf Holighaus
-
+  author: "Ralf Holighaus"
+  source_url: "https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/Vesternet%208%20Button%20Zigbee%20Wall%20Controller%20z2m.yaml"
   input:
     wall_controller_event:
       name: Wall Controller Event Entity
