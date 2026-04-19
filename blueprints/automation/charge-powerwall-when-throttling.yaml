@@ -1,0 +1,190 @@
+blueprint:
+  name: "GoodWe Throttle -> Tesla Battery Backup Reserve"
+  description: >
+    Raises a Tesla Powerwall (Teslemetry) backup reserve to absorb excess solar
+    when the GoodWe G100 throttle blueprint signals load-dispatch active, then
+    restores the reserve once the dispatch signal clears.
+
+    Designed to consume the load_dispatch_switch output from the GoodWe G100
+    Export Throttle blueprint, inheriting its ramp-up/ramp-down hysteresis.
+
+    Cooldown: after setting the reserve in either direction the automation waits
+    (via wait_for_trigger) for the dispatch signal to flip again, with a minimum
+    hold time. Mode is restart, so a rapid flip while waiting still triggers a
+    fresh run.
+
+    Prerequisites:
+      - GoodWe G100 Export Throttle blueprint running with a load_dispatch_switch
+      - Teslemetry integration providing the battery backup_reserve number entity
+      - (Optional) notification service for reserve-change alerts
+
+  domain: automation
+  author: "Ralf Holighaus / Claude"
+  input:
+    dispatch_switch:
+      name: "Load Dispatch Switch"
+      description: >
+        The input_boolean or switch the GoodWe G100 throttle blueprint drives.
+        ON = throttling active, OFF = throttling released.
+      selector:
+        entity:
+          domain:
+            - input_boolean
+            - switch
+
+    backup_reserve_number:
+      name: "Battery Backup Reserve Number"
+      description: >
+        Teslemetry number entity controlling the backup reserve percentage
+        (e.g. number.the_grange_a_backup_reserve).
+      selector:
+        entity:
+          domain:
+            - number
+
+    battery_soc_sensor:
+      name: "Battery SoC Sensor (optional)"
+      description: >
+        Sensor reporting battery % charged. Used only for notification messages.
+        Leave empty if not needed.
+      default:
+      selector:
+        entity:
+          domain:
+            - sensor
+          device_class:
+            - battery
+
+    throttle_reserve_pct:
+      name: "Reserve % when throttling active"
+      description: >
+        Backup reserve to set when the dispatch signal turns ON.
+        100 forces the battery to charge from surplus solar.
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 5
+          unit_of_measurement: "%"
+          mode: slider
+
+    normal_reserve_pct:
+      name: "Reserve % when throttling released"
+      description: >
+        Backup reserve to restore once the dispatch signal turns OFF.
+        Set to your normal standby value (e.g. 20).
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 5
+          unit_of_measurement: "%"
+          mode: slider
+
+    min_hold_seconds:
+      name: "Minimum hold time (seconds)"
+      description: >
+        After the reserve changes, do not react to another dispatch flip for at
+        least this many seconds. 900 = 15 minutes.
+      default: 900
+      selector:
+        number:
+          min: 60
+          max: 3600
+          step: 60
+          unit_of_measurement: "s"
+          mode: slider
+
+    notify_service:
+      name: "Notification service (optional)"
+      description: >
+        Service for reserve-change notifications, e.g.
+        notify.mobile_app_ralf_iphone. Leave empty to disable.
+      default: ""
+      selector:
+        text:
+
+variables:
+  dispatch_switch: !input dispatch_switch
+  backup_reserve_number: !input backup_reserve_number
+  battery_soc_sensor: !input battery_soc_sensor
+  throttle_reserve_pct: !input throttle_reserve_pct
+  normal_reserve_pct: !input normal_reserve_pct
+  min_hold_seconds: !input min_hold_seconds
+  notify_service: !input notify_service
+
+trigger:
+  - platform: state
+    entity_id: !input dispatch_switch
+    to: "on"
+    id: dispatch_on
+  - platform: state
+    entity_id: !input dispatch_switch
+    to: "off"
+    id: dispatch_off
+
+condition: []
+
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: dispatch_on
+        sequence:
+          - alias: "Set reserve to throttle level"
+            service: number.set_value
+            target:
+              entity_id: !input backup_reserve_number
+            data:
+              value: "{{ throttle_reserve_pct }}"
+          - if:
+              - condition: template
+                value_template: "{{ notify_service != '' }}"
+            then:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "Solar throttling: battery reserve raised"
+                  message: "GoodWe throttling active - reserve set to {{ throttle_reserve_pct }}%."
+          - alias: "Wait for dispatch to clear"
+            wait_for_trigger:
+              - platform: state
+                entity_id: !input dispatch_switch
+                to: "off"
+            timeout:
+              hours: 12
+            continue_on_timeout: true
+          - delay:
+              seconds: "{{ min_hold_seconds }}"
+
+      - conditions:
+          - condition: trigger
+            id: dispatch_off
+        sequence:
+          - alias: "Restore reserve to normal level"
+            service: number.set_value
+            target:
+              entity_id: !input backup_reserve_number
+            data:
+              value: "{{ normal_reserve_pct }}"
+          - if:
+              - condition: template
+                value_template: "{{ notify_service != '' }}"
+            then:
+              - service: "{{ notify_service }}"
+                data:
+                  title: "Solar throttling cleared: reserve restored"
+                  message: "GoodWe throttling released - reserve restored to {{ normal_reserve_pct }}%."
+          - alias: "Wait for dispatch to re-activate"
+            wait_for_trigger:
+              - platform: state
+                entity_id: !input dispatch_switch
+                to: "on"
+            timeout:
+              hours: 12
+            continue_on_timeout: true
+          - delay:
+              seconds: "{{ min_hold_seconds }}"
+
+mode: restart

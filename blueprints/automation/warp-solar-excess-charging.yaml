@@ -1,0 +1,516 @@
+blueprint:
+  name: WARP EV Solar Excess Charging (solar-only with timers)
+  description: |
+    ⚡ **WARP EV Charger Solar-Only Blueprint**  
+    This blueprint controls a WARP EV charger to charge *only from solar surplus* (no grid, no battery), 
+    with optional manual override, and robust **start/stop timers** to avoid flicker during cloud changes.  
+    It supports both **single-phase** and **three-phase** setups, and Tesla batteries (to avoid discharging during charge).
+
+    🛠 **Required Helpers — must be created manually before using this blueprint:**  
+    1. 🟡 **Override Switch**  
+       - Type: `input_boolean`  
+       - Suggested name: `override_ev_charging`  
+       - Entity ID example: `input_boolean.override_ev_charging`  
+       - Purpose: If turned ON, bypasses solar logic and forces maximum charging immediately.
+
+    2. 🟢 **Solar Start Timer**  
+       - Type: `timer`  
+       - Suggested name: `solar_start`  
+       - Entity ID: `timer.solar_start`  
+       - Recommended duration: `00:02:00` (120 s)  
+       - Purpose: Ensures solar surplus is stable for X seconds before starting to charge.
+
+    3. 🔴 **No-Solar Stop Timer**  
+       - Type: `timer`  
+       - Suggested name: `no_solar_stop`  
+       - Entity ID: `timer.no_solar_stop`  
+       - Recommended duration: `00:02:00` (120 s)  
+       - Purpose: Ensures persistent deficit for X seconds before stopping charging.
+
+    👉 Create these in **Settings → Devices & Services → Helpers** before importing or using the blueprint.
+
+    ⚠️ **Important:**  
+    - The blueprint cannot auto-create helpers for you.  
+    - If these entities are missing, the automation will fail to save or run correctly.  
+    - You can use different entity IDs if you prefer, but you must adjust the blueprint accordingly.
+
+    💡 Tip: Use shorter start timers (e.g. 60 s) and longer stop timers (e.g. 120 s) for best results in cloudy climates.
+
+  domain: automation
+  input:
+    grid_power_sensor:
+      name: Grid Power Sensor (total, or single phase if 1φ)
+      selector:
+        entity: { domain: sensor, device_class: power }
+    grid_power_l1:
+      name: (Optional) Grid Power L1
+      default: ""
+      selector:
+        entity: { domain: sensor, device_class: power }
+    grid_power_l2:
+      name: (Optional) Grid Power L2
+      default: ""
+      selector:
+        entity: { domain: sensor, device_class: power }
+    grid_power_l3:
+      name: (Optional) Grid Power L3
+      default: ""
+      selector:
+        entity: { domain: sensor, device_class: power }
+
+    battery_sensor:
+      name: (Optional) Battery Sensor (total, or single phase if 1φ; + = discharge, – = charge)
+      default: ""
+      selector:
+        entity: { domain: sensor, device_class: power }
+    battery_l1:
+      name: (Optional) Battery L1
+      default: ""
+      selector:
+        entity: { domain: sensor, device_class: power }
+    battery_l2:
+      name: (Optional) Battery L2
+      default: ""
+      selector:
+        entity: { domain: sensor, device_class: power }
+    battery_l3:
+      name: (Optional) Battery L3
+      default: ""
+      selector:
+        entity: { domain: sensor, device_class: power }
+
+    battery_unit:
+      name: Battery Sensor Unit
+      default: "kW"
+      selector:
+        select:
+          options: ["W", "kW"]
+
+    override_switch:
+      name: Override Switch (force max charging)
+      selector:
+        entity: { domain: input_boolean }
+    charger_power_sensor:
+      name: Charger Power Sensor (wallbox feeder only)
+      selector:
+        entity: { domain: sensor, device_class: power }
+    warp_current_number:
+      name: WARP Max Current Number
+      selector:
+        entity: { domain: number }
+    warp_start_button:
+      name: WARP Start Button
+      selector:
+        entity: { domain: button }
+    warp_stop_button:
+      name: WARP Stop Button
+      selector:
+        entity: { domain: button }
+    warp_cable_sensor:
+      name: Cable Connected Sensor
+      selector:
+        entity: { domain: binary_sensor }
+
+    export_reserve_w:
+      name: Export Reserve (W)
+      default: 300
+      selector:
+        number: { min: 0, max: 2000, step: 50 }
+    max_import_w:
+      name: Max Import Allowed (W)
+      default: 200
+      selector:
+        number: { min: 0, max: 2000, step: 50 }
+    max_amps:
+      name: Max Amps
+      default: 32
+      selector:
+        number: { min: 6, max: 32, step: 1 }
+    min_amps:
+      name: Min Amps (0 = allow stop)
+      default: 6
+      selector:
+        number: { min: 0, max: 16, step: 1 }
+    phases_config:
+      name: Preferred Phases (fallback if auto-detect fails)
+      default: "3"
+      selector:
+        select: { options: ["1", "3"] }
+    ln_voltage:
+      name: Line-to-Neutral Voltage
+      default: 230
+      selector:
+        number: { min: 200, max: 260, step: 1 }
+    ll_voltage:
+      name: Line-to-Line Voltage
+      default: 400
+      selector:
+        number: { min: 360, max: 420, step: 1 }
+    power_factor:
+      name: Power Factor
+      default: 1.0
+      selector:
+        number: { min: 0.8, max: 1.0, step: 0.01 }
+    ramp_step_amps:
+      name: Ramp Step (A)
+      default: 2
+      selector:
+        number: { min: 1, max: 8, step: 1 }
+    update_every:
+      name: Update interval
+      default: "/10"
+      selector:
+        select: { options: ["/5", "/10", "/15", "/30", "/60"] }
+    stop_delay:
+      name: Stop Delay (s)
+      default: 120
+      selector:
+        number: { min: 0, max: 600, step: 10 }
+    start_delay:
+      name: Start Delay (s)
+      default: 60
+      selector:
+        number: { min: 0, max: 600, step: 10 }
+    enable_debug:
+      name: Debug Logging
+      default: false
+      selector:
+        boolean:
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  # Main recalculation loop
+  - platform: time_pattern
+    seconds: !input update_every
+
+  # Timer finished events
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: timer.no_solar_stop
+
+  - platform: event
+    event_type: timer.finished
+    event_data:
+      entity_id: timer.solar_start
+
+variables:
+  # Bind inputs
+  grid_sensor: !input grid_power_sensor
+  grid_l1_sensor: !input grid_power_l1
+  grid_l2_sensor: !input grid_power_l2
+  grid_l3_sensor: !input grid_power_l3
+  battery_total_sensor: !input battery_sensor
+  battery_l1_sensor: !input battery_l1
+  battery_l2_sensor: !input battery_l2
+  battery_l3_sensor: !input battery_l3
+  battery_unit: !input battery_unit
+
+  override_entity: !input override_switch
+  charger_sensor: !input charger_power_sensor
+  current_number: !input warp_current_number
+  cable_sensor: !input warp_cable_sensor
+
+  # Settings
+  max_import: !input max_import_w
+  export_reserve: !input export_reserve_w
+  min_amps: !input min_amps
+  max_amps: !input max_amps
+  ramp_step: !input ramp_step_amps
+  ln_v: !input ln_voltage
+  ll_v: !input ll_voltage
+  pf: !input power_factor
+  phases_cfg: !input phases_config
+  debug: !input enable_debug
+  stop_delay: !input stop_delay
+  start_delay: !input start_delay
+
+  # Scaling for battery sensors
+  batt_scale: >
+    {% if battery_unit == "kW" %} 1000 {% else %} 1 {% endif %}
+
+  # Read grid (W). Negative = export, positive = import.
+  grid_total: "{{ states(grid_sensor|string) | float(0) }}"
+  grid_l1: >
+    {% if grid_l1_sensor|default("")|string|length > 0 %}{{ states(grid_l1_sensor|string) | float(0) }}{% else %}none{% endif %}
+  grid_l2: >
+    {% if grid_l2_sensor|default("")|string|length > 0 %}{{ states(grid_l2_sensor|string) | float(0) }}{% else %}none{% endif %}
+  grid_l3: >
+    {% if grid_l3_sensor|default("")|string|length > 0 %}{{ states(grid_l3_sensor|string) | float(0) }}{% else %}none{% endif %}
+
+  # Battery power (+ discharge, – charge), scaled to W
+  batt_l1: >
+    {% if battery_l1_sensor|default("")|string|length > 0 %}{{ states(battery_l1_sensor|string) | float(0) * batt_scale }}{% else %}none{% endif %}
+  batt_l2: >
+    {% if battery_l2_sensor|default("")|string|length > 0 %}{{ states(battery_l2_sensor|string) | float(0) * batt_scale }}{% else %}none{% endif %}
+  batt_l3: >
+    {% if battery_l3_sensor|default("")|string|length > 0 %}{{ states(battery_l3_sensor|string) | float(0) * batt_scale }}{% else %}none{% endif %}
+  batt_total: >
+    {% if batt_l1 is not none and batt_l2 is not none and batt_l3 is not none %}
+      {{ batt_l1 + batt_l2 + batt_l3 }}
+    {% elif battery_total_sensor|default("")|string|length > 0 %}
+      {{ states(battery_total_sensor|string) | float(0) * batt_scale }}
+    {% else %}0{% endif %}
+
+  # Export/import helpers (W)
+  min_phase_export: >
+    {% if grid_l1 is not none and grid_l2 is not none and grid_l3 is not none %}
+      {{ [(-grid_l1 if grid_l1 < 0 else 0),
+          (-grid_l2 if grid_l2 < 0 else 0),
+          (-grid_l3 if grid_l3 < 0 else 0)] | min }}
+    {% else %}
+      {{ (0 - grid_total) if grid_total < 0 else 0 }}
+    {% endif %}
+  max_phase_import: >
+    {% if grid_l1 is not none and grid_l2 is not none and grid_l3 is not none %}
+      {{ [(grid_l1 if grid_l1 > 0 else 0),
+          (grid_l2 if grid_l2 > 0 else 0),
+          (grid_l3 if grid_l3 > 0 else 0)] | max }}
+    {% else %}
+      {{ grid_total if grid_total > 0 else 0 }}
+    {% endif %}
+
+  # Battery discharge power (W, only positive)
+  battery_discharge_power: >
+    {% if batt_l1 is not none and batt_l2 is not none and batt_l3 is not none %}
+      {{ [(batt_l1 if batt_l1 > 0 else 0),
+          (batt_l2 if batt_l2 > 0 else 0),
+          (batt_l3 if batt_l3 > 0 else 0)] | sum }}
+    {% else %}
+      {{ batt_total if batt_total > 0 else 0 }}
+    {% endif %}
+
+  # Charger + state
+  charger_power: "{{ states(charger_sensor|string) | float(0) }}"
+  current_amps_now: "{{ states(current_number|string) | float(0) }}"
+  override_on: "{{ is_state(override_entity|string, 'on') }}"
+  cable_connected: "{{ is_state(cable_sensor|string, 'on') }}"
+
+  # Per-amp watts & phase detection (for A→W conversion)
+  per_amp_w: >
+    {% set a = current_amps_now %}
+    {% if a >= 6 and charger_power > 1000 %}
+      {{ (charger_power / a) | float(0) }}
+    {% else %}0{% endif %}
+  using_three_phase: >
+    {% if per_amp_w > 0 %}
+      {{ 1 if per_amp_w > 400 else 0 }}
+    {% else %}
+      {{ 1 if phases_cfg|string == '3' else 0 }}
+    {% endif %}
+  denom: >
+    {% if using_three_phase|int == 1 %}
+      {{ 1.732 * (ll_v | float(400)) * (pf | float(1)) }}
+    {% else %}
+      {{ (ln_v | float(230)) * (pf | float(1)) }}
+    {% endif %}
+
+  # ******** Strict solar-only target (with short-circuit fix) ********
+  available_solar: >
+    {% set exp = min_phase_export | float(0) %}
+    {% set avail = exp - (export_reserve | float(0)) %}
+    {{ avail if avail > 0 else 0 }}
+  target_power: >
+    {{ (available_solar | float(0)) - (battery_discharge_power | float(0)) }}
+  target_from_solar: >
+    {% if (target_power | float(0)) > 0 and (denom | float(0)) > 0 %}
+      {{ (target_power / denom) | float(0) }}
+    {% else %}0{% endif %}
+  target_with_import_limit: >
+    {% set t = target_from_solar | float(0) %}
+    {% if t <= 0 %}
+      0
+    {% elif max_phase_import > max_import %}
+      {{ (current_amps_now | float(0)) - 1 }}
+    {% else %}
+      {{ t }}
+    {% endif %}
+  target_amps_clamped: >
+    {% set t = target_with_import_limit | float(0) %}
+    {% set lo = min_amps | float(0) %}
+    {% set hi = max_amps | float(32) %}
+    {% if t <= 0 %}
+      0
+    {% elif t < lo %}
+      {{ lo }}
+    {% elif t > hi %}
+      {{ hi }}
+    {% else %}
+      {{ t }}
+    {% endif %}
+  final_target_amps: "{{ (target_amps_clamped | float(0)) | round(0, 'ceil') }}"
+  # Ramping (no abs)
+  ramped_amps: >
+    {% set now = current_amps_now | float(0) %}
+    {% set tgt = final_target_amps | float(0) %}
+    {% set step = ramp_step | float(1) %}
+    {% set delta = tgt - now %}
+    {% if tgt <= 0 %}0
+    {% elif (delta <= step) and (delta >= -step) %}{{ tgt | round(0) }}
+    {% else %}{{ (now + (step if delta > 0 else -step)) | round(0) }}
+    {% endif %}
+
+action:
+  # Debug log
+  - choose:
+      - conditions: "{{ debug }}"
+        sequence:
+          - action: logbook.log
+            data:
+              name: "WARP Solar Debug"
+              entity_id: automation.this
+              message: >
+                GridTotal={{ grid_total | round(0) }} W
+                {% if grid_l1 is not none %}, L1={{ grid_l1 | round(0) }} W, L2={{ grid_l2 | round(0) }} W, L3={{ grid_l3 | round(0) }} W{% endif %}
+                BattTotal={{ batt_total | round(0) }} W
+                {% if batt_l1 is not none %}, L1={{ batt_l1 | round(0) }} W, L2={{ batt_l2 | round(0) }} W, L3={{ batt_l3 | round(0) }} W{% endif %}
+                | Export(minφ)={{ min_phase_export | round(0) }} W
+                | AvailSolar={{ available_solar | round(0) }} W
+                | BattDischarge={{ battery_discharge_power | round(0) }} W
+                | ImportMax={{ max_phase_import | round(0) }} W
+                | Charger={{ charger_power | round(0) }} W
+                | TargetA_solar={{ target_from_solar | round(1) }} A
+                | TargetA_import={{ target_with_import_limit | round(1) }} A
+                | Clamp={{ target_amps_clamped | round(0) }} A
+                | Final={{ final_target_amps | round(0) }} A
+                | Ramped={{ ramped_amps }} A
+
+  # --- TIMER FINISHED BRANCHES ---
+
+  # Start timer finished → start charging if condition still valid
+  - choose:
+      - conditions: >
+          {{ trigger.platform == 'event'
+             and trigger.event.event_type == 'timer.finished'
+             and trigger.event.data.entity_id == 'timer.solar_start' }}
+        sequence:
+          - condition: template
+            value_template: >
+              {{ (not override_on) and cable_connected and (final_target_amps | float(0)) > 0 }}
+          - action: number.set_value
+            target:
+              entity_id: !input warp_current_number
+            data:
+              value: "{{ ramped_amps | int }}"
+          - action: button.press
+            target:
+              entity_id: !input warp_start_button
+
+  # Stop timer finished → stop charging if condition still valid
+  - choose:
+      - conditions: >
+          {{ trigger.platform == 'event'
+             and trigger.event.event_type == 'timer.finished'
+             and trigger.event.data.entity_id == 'timer.no_solar_stop' }}
+        sequence:
+          - condition: template
+            value_template: >
+              {{ (not override_on) and cable_connected
+                 and ( (final_target_amps | float(0)) <= 0
+                       or (battery_discharge_power | float(0)) > 0 ) }}
+          - action: button.press
+            target:
+              entity_id: !input warp_stop_button
+
+  # --- OVERRIDE ---
+
+  - choose:
+      - conditions: "{{ override_on and cable_connected }}"
+        sequence:
+          # cancel any timers
+          - choose:
+              - conditions: "{{ states('timer.solar_start') == 'active' }}"
+                sequence:
+                  - action: timer.cancel
+                    target:
+                      entity_id: timer.solar_start
+              - conditions: "{{ states('timer.no_solar_stop') == 'active' }}"
+                sequence:
+                  - action: timer.cancel
+                    target:
+                      entity_id: timer.no_solar_stop
+          - action: number.set_value
+            target:
+              entity_id: !input warp_current_number
+            data:
+              value: !input max_amps
+          - action: button.press
+            target:
+              entity_id: !input warp_start_button
+
+  # --- START LOGIC ---
+
+  - choose:
+      - conditions: >
+          {{ (not override_on) and cable_connected and (final_target_amps | float(0)) > 0 }}
+        sequence:
+          - choose:
+              # if stop timer running → cancel it (sun returned)
+              - conditions: "{{ states('timer.no_solar_stop') == 'active' }}"
+                sequence:
+                  - action: timer.cancel
+                    target:
+                      entity_id: timer.no_solar_stop
+              # if start timer not already running → start it
+              - conditions: "{{ states('timer.solar_start') != 'active' }}"
+                sequence:
+                  - action: timer.start
+                    target:
+                      entity_id: timer.solar_start
+                    data:
+                      duration: >
+                        {{ '%02d:%02d:%02d' | format(
+                            (start_delay | int) // 3600,
+                            ((start_delay | int) % 3600) // 60,
+                            (start_delay | int) % 60
+                          ) }}
+
+  # --- STOP LOGIC ---
+
+  - choose:
+      - conditions: >
+          {{ (not override_on) and cable_connected
+             and ( (final_target_amps | float(0)) <= 0
+                   or (battery_discharge_power | float(0)) > 0 ) }}
+        sequence:
+          - choose:
+              # cancel start timer if it's running (sun gone)
+              - conditions: "{{ states('timer.solar_start') == 'active' }}"
+                sequence:
+                  - action: timer.cancel
+                    target:
+                      entity_id: timer.solar_start
+              # start stop timer if not already active
+              - conditions: "{{ states('timer.no_solar_stop') != 'active' }}"
+                sequence:
+                  - action: timer.start
+                    target:
+                      entity_id: timer.no_solar_stop
+                    data:
+                      duration: >
+                        {{ '%02d:%02d:%02d' | format(
+                            (stop_delay | int) // 3600,
+                            ((stop_delay | int) % 3600) // 60,
+                            (stop_delay | int) % 60
+                          ) }}
+
+  # --- SAFETY CLEANUP ---
+
+  # Cancel timers if cable disconnected or override flips
+  - choose:
+      - conditions: >
+          {{ (not cable_connected) or override_on }}
+        sequence:
+          - choose:
+              - conditions: "{{ states('timer.solar_start') == 'active' }}"
+                sequence:
+                  - action: timer.cancel
+                    target:
+                      entity_id: timer.solar_start
+              - conditions: "{{ states('timer.no_solar_stop') == 'active' }}"
+                sequence:
+                  - action: timer.cancel
+                    target:
+                      entity_id: timer.no_solar_stop

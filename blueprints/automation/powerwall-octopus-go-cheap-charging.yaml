@@ -1,0 +1,117 @@
+blueprint:
+  name: Multi-Site Powerwall – charge when current Octopus rate < next rate
+  description: >
+    For multiple Teslemetry-linked Powerwall sites, charge from grid while the
+    current Octopus rate is cheaper than the next rate. Automatically constructs
+    and controls each site's backup-reserve number and grid-charge switch.
+  domain: automation
+  input:
+    current_rate_entity:
+      name: Current rate entity
+      selector:
+        entity:
+          domain: sensor
+    next_rate_entity:
+      name: Next rate entity
+      selector:
+        entity:
+          domain: sensor
+    teslemetry_sites:
+      name: Teslemetry site names
+      description: >
+        Enter one or more site prefixes as they appear in your Teslemetry
+        entities (e.g. for `number.home_backup_reserve_percent` enter `home`).
+      selector:
+        text:
+          multiple: true
+    target_percent:
+      name: Target reserve during cheap window
+      default: 100
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    normal_percent:
+      name: Normal backup reserve after cheap window
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    min_percent:
+      name: Minimum allowed reserve
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 1
+          unit_of_measurement: "%"
+mode: restart
+max_exceeded: silent
+variables:
+  current_rate: !input current_rate_entity
+  next_rate: !input next_rate_entity
+  sites: !input teslemetry_sites
+  target_charge: !input target_percent
+  normal_backup: !input normal_percent
+  min_backup: !input min_percent
+trigger:
+  - platform: state
+    entity_id:
+      - !input current_rate_entity
+      - !input next_rate_entity
+    id: rate_change
+action:
+  - variables:
+      current: "{{ states(current_rate) | float(9999) }}"
+      next: "{{ states(next_rate) | float(9999) }}"
+      cheap: "{{ current < next }}"
+  - choose:
+      # === CHEAP WINDOW START ===
+      - conditions:
+          - condition: template
+            value_template: "{{ cheap }}"
+        sequence:
+          - alias: Enable charge from grid
+            repeat:
+              for_each: "{{ sites }}"
+              sequence:
+                - service: switch.turn_on
+                  target:
+                    entity_id: "switch.{{ repeat.item }}_allow_charging_from_grid"
+          - alias: Set backup reserve to target
+            repeat:
+              for_each: "{{ sites }}"
+              sequence:
+                - service: number.set_value
+                  target:
+                    entity_id: "number.{{ repeat.item }}_backup_reserve"
+                  data:
+                    value: "{{ [target_charge | int, min_backup | int] | max }}"
+          - delay: "00:00:03"
+      # === CHEAP WINDOW END ===
+      - conditions:
+          - condition: template
+            value_template: "{{ not cheap }}"
+        sequence:
+          - alias: Restore normal backup reserve
+            repeat:
+              for_each: "{{ sites }}"
+              sequence:
+                - service: number.set_value
+                  target:
+                    entity_id: "number.{{ repeat.item }}_backup_reserve"
+                  data:
+                    value: "{{ [normal_backup | int, min_backup | int] | max }}"
+          - alias: Disable charge from grid
+            repeat:
+              for_each: "{{ sites }}"
+              sequence:
+                - service: switch.turn_off
+                  target:
+                    entity_id: "switch.{{ repeat.item }}_allow_charging_from_grid"
