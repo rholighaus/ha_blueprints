@@ -13,7 +13,7 @@ blueprint:
     hold time. Mode is restart, so a rapid flip while waiting still triggers a
     fresh run.
 
-    **Version: 1.1**
+    **Version: 1.2**
 
     Prerequisites:
       - GoodWe G100 Export Throttle blueprint running with a load_dispatch_switch
