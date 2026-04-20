@@ -1,5 +1,4 @@
 HA_PATH := /config/blueprints/automation/rholighaus
-BLUEPRINTS := $(wildcard blueprints/automation/*.yaml)
 
 # Push to GitHub
 push:
@@ -9,16 +8,17 @@ push:
 
 # Copy all blueprints from Mac to HA
 sync-to-ha:
-	@for f in $(BLUEPRINTS); do \
-		ssh homeassistant "cat > \"$(HA_PATH)/$$(basename $$f)\"" < "$$f" && \
-		echo "→ HA: $$(basename $$f)"; \
+	@find blueprints/automation -maxdepth 1 -name "*.yaml" -print0 | \
+	while IFS= read -r -d '' f; do \
+		ssh homeassistant "sudo tee \"$(HA_PATH)/$$(basename "$$f")\" > /dev/null" < "$$f" && \
+		echo "→ HA: $$(basename "$$f")"; \
 	done
 
 # Pull all blueprints from HA to Mac
 pull-from-ha:
-	@ssh homeassistant "ls $(HA_PATH)/*.yaml" | while read f; do \
-		ssh homeassistant "cat \"$$f\"" > "blueprints/automation/$$(basename $$f)" && \
-		echo "← HA: $$(basename $$f)"; \
+	@ssh homeassistant "ls '$(HA_PATH)'/*.yaml" | while IFS= read -r f; do \
+		ssh homeassistant "cat \"$$f\"" > "blueprints/automation/$$(basename "$$f")" && \
+		echo "← HA: $$(basename "$$f")"; \
 	done
 
 # Push to GitHub and sync to HA
@@ -29,9 +29,10 @@ bump-version:
 	@if [ -z "$(VERSION)" ]; then \
 		echo "Usage: make bump-version VERSION=1.1"; exit 1; \
 	fi
-	@for f in $(BLUEPRINTS); do \
+	@find blueprints/automation -maxdepth 1 -name "*.yaml" -print0 | \
+	while IFS= read -r -d '' f; do \
 		sed -i '' "s/\*\*Version: [0-9.]*\*\*/**Version: $(VERSION)**/" "$$f" && \
-		echo "Bumped: $$(basename $$f) -> $(VERSION)"; \
+		echo "Bumped: $$(basename "$$f") -> $(VERSION)"; \
 	done
 
 # Reload blueprints on HA (via homeassistant.reload_all)
