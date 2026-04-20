@@ -77,3 +77,37 @@ make release VERSION=1.1        # bump + deploy + git tag
 - Edit blueprints on Mac → `make deploy`
 - Edit blueprints on HA via File Editor → `make pull-from-ha` then `make push`
 - New release → `make release VERSION=X.Y`
+
+## Home Assistant GoodWe G100 Throttle Blueprint
+
+**Blueprint location:** `blueprints/automation/rholighaus/goodwe_g100_throttle.yaml`
+
+### Architecture
+- Three phases (A/B/C), each with a GoodWe 10kW inverter controlled via Modbus TCP
+- Each phase also has an uncontrolled 6kW FoxESS inverter (to be replaced with GoodWe 6kW later)
+- Control script: `/config/scripts/goodwe_reg.py <host> write 45484 <value>`
+- Register 45484 = Active Power limit in permille (0-1000, where 1000 = 100%)
+
+### Inverter IPs and entities
+| Phase | IP | GoodWe 10k PV sensor | Grid sensor | Solar CT clamp |
+|-------|-----|----------------------|-------------|----------------|
+| A | 10.27.1.105 | sensor.goodwe_10k_phase_1_pv_power_total | sensor.grid_phase_a_power | sensor.solar_a_power |
+| B | 10.27.1.106 | sensor.goodwe_10k_phase_2_pv_power_total | sensor.grid_phase_b_power | sensor.solar_b_power |
+| C | 10.27.1.107 | sensor.goodwe_10k_phase_3_pv_power_total | sensor.grid_phase_c_power | sensor.solar_c_power |
+
+### Key helpers
+- `input_number.goodwe_phase_{a,b,c}_current_limit_permille` — tracks current throttle state
+- `input_boolean.goodwe_phase_{a,b,c}_throttle_enable` — enable/disable per phase
+- `input_boolean.goodwe_phase_{a,b,c}_throttling_active` — load dispatch signal
+- `timer.goodwe_phase_{a,b,c}_dispatch_release_timer` — 15 min release delay
+
+### Known issues / important notes
+- `goodwe_active` check MUST use `solar_power_sensor` (CT clamp), NOT `pv_power_sensor`
+  Reason: pv_power_total drops to near zero when throttled, causing a feedback loop
+  (goodwe_active → False → release to 1000‰ → spike → throttle → repeat)
+- solar_b_power CT clamp is physically wired in reverse — blueprint uses `| abs` to handle this
+- G100 per-phase export limit: 7000W
+- shell_command entries in configuration.yaml:
+    goodwe_set_power_phase_a: "python3 /config/scripts/goodwe_reg.py 10.27.1.105 write 45484 {{ value }}"
+    goodwe_set_power_phase_b: "python3 /config/scripts/goodwe_reg.py <IP_B> write 45484 {{ value }}"
+    goodwe_set_power_phase_c: "python3 /config/scripts/goodwe_reg.py <IP_C> write 45484 {{ value }}"

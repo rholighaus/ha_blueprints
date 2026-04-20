@@ -321,8 +321,8 @@ action:
               current_permille: >
                 {{ states(current_limit_helper) | float(1000) }}
               goodwe_active: >
-                {{ states(pv_power_sensor) not in ['unavailable', 'unknown']
-                   and states(pv_power_sensor) | float(0) >= min_pv_production_w }}
+                {{ states(solar_power_sensor) not in ['unavailable', 'unknown']
+                   and states(solar_power_sensor) | float(0) | abs >= min_pv_production_w }}
               pv_output_w: >
                 {{ states(pv_power_sensor) | float(0) }}
               solar_w: >
