@@ -432,10 +432,10 @@ action:
                 {{ [pv_6k_w - effective_excess_w * rated_w_6k / total_rated_w, 0] | max }}
               # Convert to permille targets
               target_permille_10k: >
-                {{ 1000 if not both_active
+                {{ 1000 if (not both_active or effective_excess_w == 0) 
                    else [target_10k_w / rated_w_10k * 1000, 1000] | min | int }}
               target_permille_6k: >
-                {{ 1000 if not both_active
+                {{ 1000 if (not both_active or effective_excess_w == 0)
                    else [target_6k_w / rated_w_6k * 1000, 1000] | min | int }}
               # Apply ramp limits in both directions
               delta_10k: "{{ target_permille_10k - current_10k }}"
