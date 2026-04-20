@@ -1,4 +1,6 @@
 HA_PATH := /config/blueprints/automation/rholighaus
+HA_URL := http://10.27.3.10:8123
+HA_TOKEN := $(shell cat ~/.ha_token 2>/dev/null)
 
 # Push to GitHub
 push:
@@ -22,7 +24,7 @@ pull-from-ha:
 	done
 
 # Push to GitHub and sync to HA
-deploy: push sync-to-ha
+deploy: push sync-to-ha reload-ha
 
 # Bump version in all blueprints (usage: make bump-version VERSION=1.1)
 bump-version:
@@ -35,12 +37,11 @@ bump-version:
 		echo "Bumped: $$(basename "$$f") -> $(VERSION)"; \
 	done
 
-# Reload blueprints on HA (via homeassistant.reload_all)
+# Reload automations on HA
 reload-ha:
-	@ssh homeassistant "curl -sf -X POST \
-		http://localhost:8123/api/services/homeassistant/reload_all \
-		-H 'Authorization: Bearer $$(cat /run/secrets/hassio_token)' \
-		-H 'Content-Type: application/json'" && echo "HA reloaded"
+	@curl -sf -X POST "$(HA_URL)/api/services/automation/reload" \
+		-H "Authorization: Bearer $(HA_TOKEN)" \
+		-H "Content-Type: application/json" > /dev/null && echo "HA automations reloaded"
 
 # Full workflow: bump version, deploy, tag release on GitHub
 release:

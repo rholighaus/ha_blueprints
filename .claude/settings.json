@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make deploy)",
+      "Bash(make sync-to-ha)",
+      "Bash(make pull-from-ha)",
+      "Bash(make reload-ha)",
+      "Bash(make release *)",
+      "Bash(make bump-version *)",
+      "Bash(ssh homeassistant \"ls *)",
+      "Bash(ssh homeassistant \"cat *)",
+      "Bash(ssh homeassistant \"grep *)",
+      "Bash(ssh homeassistant \"find *)",
+      "Bash(ssh homeassistant \"ha core check*)",
+      "Bash(ssh homeassistant \"ha core info*)",
+      "Bash(ssh homeassistant \"ha core logs*)"
+    ]
+  }
+}
