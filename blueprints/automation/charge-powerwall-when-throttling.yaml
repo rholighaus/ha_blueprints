@@ -13,6 +13,8 @@ blueprint:
     hold time. Mode is restart, so a rapid flip while waiting still triggers a
     fresh run.
 
+    **Version: 1.1**
+
     Prerequisites:
       - GoodWe G100 Export Throttle blueprint running with a load_dispatch_switch
       - Teslemetry integration providing the battery backup_reserve number entity
@@ -22,6 +24,14 @@ blueprint:
   author: "Ralf Holighaus / Claude"
   source_url: "https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/charge-powerwall-when-throttling.yaml"
   input:
+    phase_name:
+      name: "Phase / Battery Name"
+      description: >
+        Human-readable label used in notifications, e.g. "Phase A" or "Grange A".
+      default: "Battery"
+      selector:
+        text:
+
     dispatch_switch:
       name: "Load Dispatch Switch"
       description: >
@@ -108,6 +118,7 @@ blueprint:
         text:
 
 variables:
+  phase_name: !input phase_name
   dispatch_switch: !input dispatch_switch
   backup_reserve_number: !input backup_reserve_number
   battery_soc_sensor: !input battery_soc_sensor
@@ -146,8 +157,8 @@ action:
             then:
               - service: "{{ notify_service }}"
                 data:
-                  title: "Solar throttling: battery reserve raised"
-                  message: "GoodWe throttling active - reserve set to {{ throttle_reserve_pct }}%."
+                  title: "Solar throttling: {{ phase_name }} reserve raised"
+                  message: "{{ phase_name }}: GoodWe throttling active - reserve set to {{ throttle_reserve_pct }}%."
           - alias: "Wait for dispatch to clear"
             wait_for_trigger:
               - platform: state
@@ -175,8 +186,8 @@ action:
             then:
               - service: "{{ notify_service }}"
                 data:
-                  title: "Solar throttling cleared: reserve restored"
-                  message: "GoodWe throttling released - reserve restored to {{ normal_reserve_pct }}%."
+                  title: "Solar throttling cleared: {{ phase_name }} reserve restored"
+                  message: "{{ phase_name }}: GoodWe throttling released - reserve restored to {{ normal_reserve_pct }}%."
           - alias: "Wait for dispatch to re-activate"
             wait_for_trigger:
               - platform: state
