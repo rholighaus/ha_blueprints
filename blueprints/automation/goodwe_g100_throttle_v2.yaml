@@ -1,0 +1,567 @@
+blueprint:
+  name: GoodWe G100 Export Throttle v2 (Proactive, Dual Inverter)
+  description: >
+    Proactive feed-forward export throttle for phases with two GoodWe inverters.
+    Designed for phases where both a 10kW and 6kW GoodWe are controllable via
+    Modbus TCP register 45484.
+
+    Key improvements over v1:
+      - PROACTIVE: Uses predicted export (solar_ct - load - battery) rather
+        than reacting to actual grid export. Stays ahead of voltage problems.
+      - GRADUAL RAMP in BOTH directions — never jumps to 100%. Eliminates the
+        high-voltage feedback loop caused by instant release to full power.
+      - DUAL INVERTER: Throttles both 10kW and 6kW proportionally to their
+        rated capacity, minimising the depth of cut on each.
+      - SAFETY MARGIN: Targets a configurable % below the G100 limit so normal
+        load fluctuations never push the phase over the limit.
+
+    Predicted export formula:
+      predicted_export = solar_ct_power - load_power - battery_power
+      (solar_ct already accounts for cable losses as it measures at the
+       Powerwall end of the cable run, not at the inverter terminals)
+
+    Proportional throttle split:
+      cut_10k = excess * rated_10k / (rated_10k + rated_6k)
+      cut_6k  = excess * rated_6k  / (rated_10k + rated_6k)
+
+    Ramp logic (applied every 10 seconds):
+      - When excess > 0: ramp DOWN both inverters at max max_ramp_down/cycle
+      - When excess <= 0: ramp UP both inverters at max max_ramp_up/cycle
+      - Never jumps instantly in either direction
+      - On HA start: restores last known permille (does NOT jump to 1000)
+      - On sunset: ramps up to 1000 gradually via normal ramp-up logic
+
+    Load dispatch hysteresis:
+      - Dispatch switch turns ON when EITHER inverter drops below lower threshold
+      - Dispatch switch turns OFF only after BOTH inverters have been above the
+        upper threshold continuously for the full release delay (timer)
+      - Timer resets if either inverter dips below upper threshold
+
+    Prerequisites:
+      - /config/scripts/goodwe_reg.py on HA instance
+      - Two shell_command entries in configuration.yaml:
+          goodwe_set_power_phase_c_10k: >
+            python3 /config/scripts/goodwe_reg.py <IP_10K> write 45484 {{ value }}
+          goodwe_set_power_phase_c_6k: >
+            python3 /config/scripts/goodwe_reg.py <IP_6K> write 45484 {{ value }}
+      - Two input_number helpers (one per inverter, min=0 max=1000)
+      - One input_boolean to enable/disable throttling
+      - One input_boolean for load dispatch signalling (optional)
+      - One timer for dispatch release delay (optional)
+
+    Future improvement:
+      When the FoxESS on Phase A/B is replaced with a GoodWe 6kW, this
+      blueprint can be used for those phases too.
+
+  domain: automation
+  source_url: https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/goodwe_g100_throttle_v2.yaml
+  author: Ralf Holighaus / Claude
+
+  input:
+    # --- 10kW Inverter ---
+    shell_command_10k:
+      name: Shell Command — 10kW Inverter
+      description: >
+        shell_command service name for the 10kW GoodWe, without prefix.
+        E.g. goodwe_set_power_phase_c_10k
+      selector:
+        text:
+
+    pv_sensor_10k:
+      name: GoodWe 10kW PV Power Sensor
+      description: >
+        e.g. sensor.goodwe_10k_phase_3_pv_power_total
+        Used for active check and proportional split calculation.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    current_limit_helper_10k:
+      name: Current Limit Helper — 10kW (input_number)
+      description: >
+        Tracks current throttle for the 10kW inverter in permille (0-1000).
+      selector:
+        entity:
+          domain: input_number
+
+    rated_w_10k:
+      name: 10kW Inverter Rated Power (W)
+      default: 10000
+      selector:
+        number:
+          min: 1000
+          max: 20000
+          step: 500
+          unit_of_measurement: W
+
+    # --- 6kW Inverter ---
+    shell_command_6k:
+      name: Shell Command — 6kW Inverter
+      description: >
+        shell_command service name for the 6kW GoodWe, without prefix.
+        E.g. goodwe_set_power_phase_c_6k
+      selector:
+        text:
+
+    pv_sensor_6k:
+      name: GoodWe 6kW PV Power Sensor
+      description: >
+        e.g. sensor.goodwe_6k_phase_3_pv_power_total
+        Used for proportional split calculation.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    current_limit_helper_6k:
+      name: Current Limit Helper — 6kW (input_number)
+      description: >
+        Tracks current throttle for the 6kW inverter in permille (0-1000).
+      selector:
+        entity:
+          domain: input_number
+
+    rated_w_6k:
+      name: 6kW Inverter Rated Power (W)
+      default: 6000
+      selector:
+        number:
+          min: 1000
+          max: 15000
+          step: 500
+          unit_of_measurement: W
+
+    # --- Phase sensors ---
+    solar_ct_sensor:
+      name: CT Clamp Solar Power Sensor
+      description: >
+        Shelly EM3 CT clamp at the Powerwall measuring total solar on this
+        phase (e.g. sensor.solar_c_power). Measures after cable losses.
+        Absolute value taken automatically for reversed CT clamps.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    load_power_sensor:
+      name: CT Clamp Load Power Sensor
+      description: >
+        Shelly EM3 CT clamp measuring house load on this phase
+        (e.g. sensor.load_c_power). Positive = consuming.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    battery_power_sensor:
+      name: CT Clamp Battery Power Sensor
+      description: >
+        Shelly EM3 CT clamp measuring Powerwall charge/discharge on this
+        phase (e.g. sensor.battery_c_power). Positive = charging.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    grid_power_sensor:
+      name: Grid Phase Power Sensor
+      description: >
+        Shelly 3EM at grid meter for this phase (e.g. sensor.grid_phase_c_power).
+        Used as safety backstop only. Negative = exporting.
+      selector:
+        entity:
+          domain: sensor
+          device_class: power
+
+    # --- Control parameters ---
+    throttle_enable:
+      name: Throttle Enable Switch (input_boolean)
+      selector:
+        entity:
+          domain: input_boolean
+
+    g100_limit_w:
+      name: G100 Per-Phase Export Limit (W)
+      default: 7000
+      selector:
+        number:
+          min: 0
+          max: 20000
+          step: 100
+          unit_of_measurement: W
+
+    safety_margin_pct:
+      name: Safety Margin (%)
+      description: >
+        Target this % below the G100 limit to give headroom for load
+        fluctuations and prevent reaching the voltage protection threshold.
+        20% on a 7000W limit = 5600W target export.
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 5
+          unit_of_measurement: "%"
+
+    min_pv_production_w:
+      name: Minimum PV Production (W)
+      description: >
+        Both inverters below this combined threshold = night/inactive.
+        Both are released to 1000 and no writes are made.
+      default: 200
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 50
+          unit_of_measurement: W
+
+    max_ramp_down:
+      name: Ramp Down Speed (permille per cycle)
+      description: >
+        Maximum throttle reduction per 10-second cycle.
+        200 = drop up to 2kW per cycle on a 10kW inverter.
+      default: 200
+      selector:
+        number:
+          min: 50
+          max: 1000
+          step: 50
+          unit_of_measurement: "‰"
+
+    max_ramp_up:
+      name: Ramp Up Speed (permille per cycle)
+      description: >
+        Maximum throttle increase per 10-second cycle.
+        Keep this LOW to avoid voltage spikes on ramp-up.
+        50 = increase by 0.5kW per cycle on a 10kW inverter.
+      default: 50
+      selector:
+        number:
+          min: 5
+          max: 200
+          step: 5
+          unit_of_measurement: "‰"
+
+    # --- Load dispatch ---
+    load_dispatch_switch:
+      name: Load Dispatch Switch (optional)
+      description: >
+        input_boolean turned ON when throttling is active below the lower
+        threshold. Use for downstream automations (pool pump, EV charger).
+        Leave empty if not needed.
+      default:
+      selector:
+        entity:
+          domain:
+            - input_boolean
+            - switch
+
+    load_dispatch_lower_threshold_pct:
+      name: Load Dispatch Lower Threshold (%)
+      description: Dispatch turns ON when EITHER inverter drops below this.
+      default: 90
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 5
+          unit_of_measurement: "%"
+
+    load_dispatch_upper_threshold_pct:
+      name: Load Dispatch Upper Threshold (%)
+      description: >
+        Dispatch turns OFF only after BOTH inverters have been above this
+        continuously for the full release delay.
+      default: 98
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    load_dispatch_release_timer:
+      name: Load Dispatch Release Timer (optional)
+      description: >
+        Timer that must complete before dispatch switch turns off.
+        Resets if either inverter dips below upper threshold.
+        Leave empty to turn off immediately when above upper threshold.
+      default:
+      selector:
+        entity:
+          domain: timer
+
+mode: single
+max_exceeded: silent
+
+trigger:
+  - platform: time_pattern
+    seconds: "/10"
+    id: periodic
+  - platform: homeassistant
+    event: start
+    id: ha_start
+  - platform: sun
+    event: sunset
+    id: sunset
+  - platform: event
+    event_type: timer.finished
+    id: timer_finished
+
+condition:
+  - condition: state
+    entity_id: !input throttle_enable
+    state: "on"
+
+variables:
+  g100_limit_w: !input g100_limit_w
+  safety_margin_pct: !input safety_margin_pct
+  rated_w_10k: !input rated_w_10k
+  rated_w_6k: !input rated_w_6k
+  min_pv_production_w: !input min_pv_production_w
+  max_ramp_down: !input max_ramp_down
+  max_ramp_up: !input max_ramp_up
+  load_dispatch_lower_threshold_pct: !input load_dispatch_lower_threshold_pct
+  load_dispatch_upper_threshold_pct: !input load_dispatch_upper_threshold_pct
+  shell_command_10k: !input shell_command_10k
+  shell_command_6k: !input shell_command_6k
+  load_dispatch_switch: !input load_dispatch_switch
+  load_dispatch_release_timer: !input load_dispatch_release_timer
+  current_limit_helper_10k: !input current_limit_helper_10k
+  current_limit_helper_6k: !input current_limit_helper_6k
+  pv_sensor_10k: !input pv_sensor_10k
+  pv_sensor_6k: !input pv_sensor_6k
+  solar_ct_sensor: !input solar_ct_sensor
+  load_power_sensor: !input load_power_sensor
+  battery_power_sensor: !input battery_power_sensor
+  grid_power_sensor: !input grid_power_sensor
+
+action:
+  - choose:
+
+      # HA start: write current permille values back to both inverters
+      # (register 45484 survives restart, but re-sync the helpers)
+      # Do NOT jump to 1000 — maintain whatever throttle was last set
+      - conditions:
+          - condition: trigger
+            id: ha_start
+        sequence:
+          - variables:
+              current_10k: "{{ states(current_limit_helper_10k) | float(1000) }}"
+              current_6k: "{{ states(current_limit_helper_6k) | float(1000) }}"
+          - service: "shell_command.{{ shell_command_10k }}"
+            data:
+              value: "{{ current_10k | int }}"
+          - service: "shell_command.{{ shell_command_6k }}"
+            data:
+              value: "{{ current_6k | int }}"
+
+      # Timer finished: both inverters above upper threshold long enough
+      - conditions:
+          - condition: trigger
+            id: timer_finished
+          - condition: template
+            value_template: >
+              {{ load_dispatch_release_timer not in ['', none]
+                 and trigger.event.data.entity_id == load_dispatch_release_timer }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ load_dispatch_switch not in ['', none] }}"
+            then:
+              - service: homeassistant.turn_off
+                target:
+                  entity_id: "{{ load_dispatch_switch }}"
+
+      # Periodic: run every 10 seconds between sunrise and sunset
+      - conditions:
+          - condition: trigger
+            id: periodic
+          - condition: sun
+            after: sunrise
+            before: sunset
+        sequence:
+          - variables:
+              current_10k: >
+                {{ states(current_limit_helper_10k) | float(1000) }}
+              current_6k: >
+                {{ states(current_limit_helper_6k) | float(1000) }}
+              pv_10k_w: >
+                {{ states(pv_sensor_10k) | float(0) }}
+              pv_6k_w: >
+                {{ states(pv_sensor_6k) | float(0) }}
+              solar_w: >
+                {{ states(solar_ct_sensor) | float(0) | abs }}
+              load_w: >
+                {{ states(load_power_sensor) | float(0) }}
+              battery_w: >
+                {{ states(battery_power_sensor) | float(0) }}
+              total_rated_w: >
+                {{ rated_w_10k + rated_w_6k }}
+              # Night/inactive check uses combined PV output
+              both_active: >
+                {{ (pv_10k_w + pv_6k_w) >= min_pv_production_w
+                   and states(pv_sensor_10k) not in ['unavailable', 'unknown']
+                   and states(pv_sensor_6k) not in ['unavailable', 'unknown'] }}
+
+          - variables:
+              # Feed-forward predicted export (CT clamp already accounts for cable loss)
+              predicted_export_w: >
+                {{ solar_w - load_w - battery_w }}
+              # Safety target: g100_limit minus safety margin
+              safety_target_w: >
+                {{ g100_limit_w * (1 - safety_margin_pct / 100) }}
+              # How much we need to cut across both inverters
+              excess_w: >
+                {{ [predicted_export_w - safety_target_w, 0] | max }}
+              # Safety backstop: actual grid export over hard limit
+              grid_excess_w: >
+                {{ [states(grid_power_sensor) | float(0) * -1 - g100_limit_w, 0] | max }}
+              # Use whichever excess is larger
+              effective_excess_w: >
+                {{ [excess_w, grid_excess_w] | max }}
+
+          - variables:
+              # Proportional target watts for each inverter
+              target_10k_w: >
+                {{ [pv_10k_w - effective_excess_w * rated_w_10k / total_rated_w, 0] | max }}
+              target_6k_w: >
+                {{ [pv_6k_w - effective_excess_w * rated_w_6k / total_rated_w, 0] | max }}
+              # Convert to permille targets
+              target_permille_10k: >
+                {{ 1000 if not both_active
+                   else [target_10k_w / rated_w_10k * 1000, 1000] | min | int }}
+              target_permille_6k: >
+                {{ 1000 if not both_active
+                   else [target_6k_w / rated_w_6k * 1000, 1000] | min | int }}
+              # Apply ramp limits in both directions
+              delta_10k: "{{ target_permille_10k - current_10k }}"
+              delta_6k: "{{ target_permille_6k - current_6k }}"
+
+          - variables:
+              new_permille_10k: >
+                {{ [[current_10k + ([delta_10k, max_ramp_up] | min | abs * ([delta_10k, 0] | max / [delta_10k | abs, 0.001] | max) | int if delta_10k != 0 else 0),
+                     0] | max, 1000] | min | int }}
+              new_permille_6k: >
+                {{ [[current_6k + ([-max_ramp_down, [delta_6k, max_ramp_up] | min] | max),
+                     0] | max, 1000] | min | int }}
+
+          # Write 10kW inverter if changed
+          - if:
+              - condition: template
+                value_template: >
+                  {{ new_permille_10k | int != current_10k | int }}
+            then:
+              - service: input_number.set_value
+                target:
+                  entity_id: !input current_limit_helper_10k
+                data:
+                  value: "{{ new_permille_10k }}"
+              - service: "shell_command.{{ shell_command_10k }}"
+                data:
+                  value: "{{ new_permille_10k }}"
+
+          # Write 6kW inverter if changed
+          - if:
+              - condition: template
+                value_template: >
+                  {{ new_permille_6k | int != current_6k | int }}
+            then:
+              - service: input_number.set_value
+                target:
+                  entity_id: !input current_limit_helper_6k
+                data:
+                  value: "{{ new_permille_6k }}"
+              - service: "shell_command.{{ shell_command_6k }}"
+                data:
+                  value: "{{ new_permille_6k }}"
+
+          # Load dispatch hysteresis
+          - if:
+              - condition: template
+                value_template: "{{ load_dispatch_switch not in ['', none] }}"
+            then:
+              - choose:
+
+                  # EITHER inverter below lower threshold → dispatch ON, cancel timer
+                  - conditions:
+                      - condition: template
+                        value_template: >
+                          {{ new_permille_10k < (load_dispatch_lower_threshold_pct * 10)
+                             or new_permille_6k < (load_dispatch_lower_threshold_pct * 10) }}
+                    sequence:
+                      - service: homeassistant.turn_on
+                        target:
+                          entity_id: "{{ load_dispatch_switch }}"
+                      - if:
+                          - condition: template
+                            value_template: >
+                              {{ load_dispatch_release_timer not in ['', none] }}
+                        then:
+                          - service: timer.cancel
+                            target:
+                              entity_id: "{{ load_dispatch_release_timer }}"
+
+                  # BOTH inverters above upper threshold → start release timer
+                  - conditions:
+                      - condition: template
+                        value_template: >
+                          {{ new_permille_10k >= (load_dispatch_upper_threshold_pct * 10)
+                             and new_permille_6k >= (load_dispatch_upper_threshold_pct * 10)
+                             and is_state(load_dispatch_switch, 'on') }}
+                    sequence:
+                      - if:
+                          - condition: template
+                            value_template: >
+                              {{ load_dispatch_release_timer not in ['', none]
+                                 and not is_state(load_dispatch_release_timer, 'active') }}
+                        then:
+                          - service: timer.start
+                            target:
+                              entity_id: "{{ load_dispatch_release_timer }}"
+                        else:
+                          - if:
+                              - condition: template
+                                value_template: >
+                                  {{ load_dispatch_release_timer in ['', none] }}
+                            then:
+                              - service: homeassistant.turn_off
+                                target:
+                                  entity_id: "{{ load_dispatch_switch }}"
+
+                  # Between thresholds or only one above upper → cancel timer (reset clock)
+                  - conditions:
+                      - condition: template
+                        value_template: >
+                          {{ is_state(load_dispatch_switch, 'on')
+                             and load_dispatch_release_timer not in ['', none]
+                             and is_state(load_dispatch_release_timer, 'active')
+                             and (new_permille_10k < (load_dispatch_upper_threshold_pct * 10)
+                                  or new_permille_6k < (load_dispatch_upper_threshold_pct * 10)) }}
+                    sequence:
+                      - service: timer.cancel
+                        target:
+                          entity_id: "{{ load_dispatch_release_timer }}"
+
+      # Sunset: turn off dispatch, cancel timer — inverters ramp up naturally next morning
+      - conditions:
+          - condition: trigger
+            id: sunset
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ load_dispatch_switch not in ['', none] }}"
+            then:
+              - service: homeassistant.turn_off
+                target:
+                  entity_id: "{{ load_dispatch_switch }}"
+          - if:
+              - condition: template
+                value_template: "{{ load_dispatch_release_timer not in ['', none] }}"
+            then:
+              - service: timer.cancel
+                target:
+                  entity_id: "{{ load_dispatch_release_timer }}"
