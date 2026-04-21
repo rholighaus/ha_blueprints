@@ -410,7 +410,7 @@ action:
           - variables:
               # Feed-forward predicted export (CT clamp already accounts for cable loss)
               predicted_export_w: >
-                {{ solar_w - load_w - battery_w }}
+                {{ solar_w - load_w + battery_w }}
               # Safety target: g100_limit minus safety margin
               safety_target_w: >
                 {{ g100_limit_w * (1 - safety_margin_pct / 100) }}
