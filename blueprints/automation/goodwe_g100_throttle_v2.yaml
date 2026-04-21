@@ -16,9 +16,11 @@ blueprint:
         load fluctuations never push the phase over the limit.
 
     Predicted export formula:
-      predicted_export = solar_ct_power - load_power - battery_power
-      (solar_ct already accounts for cable losses as it measures at the
-       Powerwall end of the cable run, not at the inverter terminals)
+      predicted_export = solar_ct_power - load_power + battery_power
+      battery_power sign: negative = charging (reduces export),
+      positive = discharging (increases export).
+      solar_ct already accounts for cable losses as it measures at the
+      Powerwall end of the cable run, not at the inverter terminals.
 
     Proportional throttle split:
       cut_10k = excess * rated_10k / (rated_10k + rated_6k)
@@ -443,7 +445,7 @@ action:
 
           - variables:
               new_permille_10k: >
-                {{ [[current_10k + ([delta_10k, max_ramp_up] | min | abs * ([delta_10k, 0] | max / [delta_10k | abs, 0.001] | max) | int if delta_10k != 0 else 0),
+                {{ [[current_10k + ([-max_ramp_down, [delta_10k, max_ramp_up] | min] | max),
                      0] | max, 1000] | min | int }}
               new_permille_6k: >
                 {{ [[current_6k + ([-max_ramp_down, [delta_6k, max_ramp_up] | min] | max),
