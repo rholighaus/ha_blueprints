@@ -15,7 +15,7 @@ blueprint:
       - target_goodwe = goodwe_output - over_limit  (clamped 0 to rated_w)
       - If under limit or night: release GoodWe to 100% immediately
       - Ramp down: limited to max_ramp_down permille per cycle
-      - Ramp up: always jumps to 100% immediately when not over limit
+      - Ramp up: limited to max_ramp_up permille per cycle (gradual in both directions)
 
     Releases to 100% on HA start, sunset, and when GoodWe is inactive.
 
@@ -166,6 +166,20 @@ blueprint:
           step: 50
           unit_of_measurement: "‰"
 
+    max_ramp_up:
+      name: Ramp Up Speed (permille per cycle)
+      description: >
+        Maximum throttle increase per 10-second cycle when ramping back up.
+        Keep lower than ramp_down to avoid voltage spikes on recovery.
+        50 = increase by 0.5kW per cycle on a 10kW inverter (~3.5 min to full power).
+      default: 50
+      selector:
+        number:
+          min: 5
+          max: 200
+          step: 5
+          unit_of_measurement: "‰"
+
     load_dispatch_switch:
       name: Load Dispatch Switch (optional)
       description: >
@@ -249,6 +263,7 @@ variables:
   min_pv_production_w: !input min_pv_production_w
   deadband_w: !input deadband_w
   max_ramp_down: !input max_ramp_down
+  max_ramp_up: !input max_ramp_up
   load_dispatch_lower_threshold_pct: !input load_dispatch_lower_threshold_pct
   load_dispatch_upper_threshold_pct: !input load_dispatch_upper_threshold_pct
   shell_command_service: !input shell_command_service
@@ -340,9 +355,8 @@ action:
 
           - variables:
               new_permille: >
-                {{ 1000 if (not goodwe_active or over_limit_w == 0)
-                   else [[current_permille + ([delta, -max_ramp_down] | max),
-                          0] | max, 1000] | min | int }}
+                {{ [[current_permille + ([-max_ramp_down, [delta, max_ramp_up] | min] | max),
+                     0] | max, 1000] | min | int }}
 
           # Only write to inverter if value changed and condition warrants it
           - if:
