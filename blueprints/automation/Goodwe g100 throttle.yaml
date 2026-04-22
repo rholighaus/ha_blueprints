@@ -362,11 +362,7 @@ action:
           - if:
               - condition: template
                 value_template: >
-                  {{ new_permille | int != current_permille | int
-                     and (not goodwe_active
-                          or over_limit_w > deadband_w
-                          or delta < 0
-                          or new_permille == 1000) }}
+                  {{ new_permille | int != current_permille | int }}
             then:
               - service: input_number.set_value
                 target:
