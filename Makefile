@@ -17,6 +17,7 @@ pull-from-ha:
 	done
 
 # ── Copy all blueprints from Mac to HA via REST API ──────────────────────────
+# Uses shell_command.write_file — registered after HA restart
 sync-to-ha:
 	@if [ -z "$(HA_TOKEN)" ]; then \
 		echo "Error: ~/.ha_token not found or empty"; exit 1; \
@@ -24,13 +25,17 @@ sync-to-ha:
 	@find blueprints/automation -name "*.yaml" | while IFS= read -r f; do \
 		name=$$(basename "$$f"); \
 		content=$$(base64 < "$$f" | tr -d '\n'); \
-		curl -sf -X POST "$(HA_URL)/api/services/shell_command/goodwe_set_power_phase_a" \
+		http_code=$$(curl -s -o /tmp/sync_out.txt -w "%{http_code}" \
+			-X POST "$(HA_URL)/api/services/shell_command/write_file" \
 			-H "Authorization: Bearer $(HA_TOKEN)" \
 			-H "Content-Type: application/json" \
-			-d "{\"value\": \"0; python3 -c \\\"import base64; open('$(HA_PATH)/$$name','wb').write(base64.b64decode('$$content'))\\\"\"}" \
-			> /dev/null && echo "→ HA: $$name"; \
+			-d "{\"path\": \"$(HA_PATH)/$$name\", \"content\": \"$$content\"}"); \
+		if [ "$$http_code" = "200" ]; then \
+			echo "→ HA: $$name"; \
+		else \
+			echo "✗ FAILED (HTTP $$http_code): $$name" && cat /tmp/sync_out.txt; \
+		fi; \
 	done
-
 # ── Reload blueprints on HA ───────────────────────────────────────────────────
 reload-ha:
 	@if [ -z "$(HA_TOKEN)" ]; then \
@@ -91,3 +96,4 @@ release:
 	@echo "Done. Create release notes at: https://github.com/rholighaus/ha_blueprints/releases"
 
 .PHONY: push pull-from-ha sync-to-ha reload-ha deploy bump-version bump-file release-file release
+
