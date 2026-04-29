@@ -1,5 +1,5 @@
 HA_PATH  := /config/blueprints/automation/rholighaus
-HA_URL   := http://homeassistant:8123
+HA_URL   := http://homeassistant.local:8123
 HA_TOKEN ?= $(shell cat ~/.ha_token 2>/dev/null | tr -d '[:space:]')
 
 # ── Push to GitHub ────────────────────────────────────────────────────────────
