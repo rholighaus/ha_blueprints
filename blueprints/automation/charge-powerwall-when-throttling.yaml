@@ -1,23 +1,32 @@
 blueprint:
-  name: "GoodWe Throttle -> Tesla Battery Backup Reserve"
+  name: "Solar Battery Reserve Manager"
   description: >
-    Raises a Tesla Powerwall (Teslemetry) backup reserve to absorb excess solar
-    when the GoodWe G100 throttle blueprint signals load-dispatch active, then
-    restores the reserve once the dispatch signal clears.
+    Raises a Tesla Powerwall backup reserve to absorb excess solar when
+    structural export (solar CT minus genuine household load) exceeds a
+    configurable threshold, and restores it once solar drops sustainably
+    below that threshold.
 
-    Designed to consume the load_dispatch_switch output from the GoodWe G100
-    Export Throttle blueprint, inheriting its ramp-up/ramp-down hysteresis.
+    Unlike the previous dispatch-switch approach, this blueprint reads
+    solar and load directly — independently of whether the inverter is
+    throttling or the battery is charging. This breaks the feedback loop
+    where battery charging suppresses throttling which resets the reserve
+    which stops battery charging which resumes throttling.
 
-    Cooldown: after setting the reserve in either direction the automation waits
-    (via wait_for_trigger) for the dispatch signal to flip again, with a minimum
-    hold time. Mode is restart, so a rapid flip while waiting still triggers a
-    fresh run.
+    Formula: structural_export = solar_ct_power - load_power
+    (battery power is deliberately excluded: it is discretionary and
+    does not reflect genuine solar generation available for export)
 
-    **Version: 1.2**
+    Raise reserve: structural_export > solar_threshold_w, sustained for
+    raise_hold_minutes.
+    Lower reserve: structural_export <= solar_threshold_w, sustained for
+    lower_hold_minutes (longer to ride out brief cloud cover).
+
+    **Version: 2.0**
 
     Prerequisites:
-      - GoodWe G100 Export Throttle blueprint running with a load_dispatch_switch
-      - Teslemetry integration providing the battery backup_reserve number entity
+      - Solar CT clamp sensor for the phase
+      - Load sensor for the phase
+      - Tesla Fleet integration providing the battery backup_reserve number entity
       - (Optional) notification service for reserve-change alerts
 
   domain: automation
@@ -32,45 +41,97 @@ blueprint:
       selector:
         text:
 
-    dispatch_switch:
-      name: "Load Dispatch Switch"
+    solar_ct_sensor:
+      name: "Solar CT Sensor"
       description: >
-        The input_boolean or switch the GoodWe G100 throttle blueprint drives.
-        ON = throttling active, OFF = throttling released.
+        CT clamp sensor measuring solar generation for this phase
+        (e.g. sensor.solar_a_power). Absolute value is used so
+        reversed CT clamp wiring is handled automatically.
       selector:
         entity:
-          domain:
-            - input_boolean
-            - switch
+          domain: sensor
+
+    load_sensor:
+      name: "Load Sensor"
+      description: >
+        Sensor measuring genuine household load for this phase
+        (e.g. sensor.load_a_power). Battery charge/discharge power
+        is intentionally excluded from this value.
+      selector:
+        entity:
+          domain: sensor
+
+    solar_threshold_w:
+      name: "Solar Export Threshold (W)"
+      description: >
+        Structural export level (solar CT - load) above which the battery
+        reserve is raised. Set to match the G100 safety target for this
+        phase, e.g. 6650 for Phase B (7000W limit, 5% margin) or
+        7600 for Phase C (8000W limit, 5% margin).
+      default: 6000
+      selector:
+        number:
+          min: 500
+          max: 15000
+          step: 100
+          unit_of_measurement: "W"
+          mode: box
+
+    raise_hold_minutes:
+      name: "Raise Hold (minutes)"
+      description: >
+        Solar must stay above threshold for this many minutes before the
+        reserve is raised. Prevents reaction to brief cloud gaps.
+        Default: 2 minutes.
+      default: 2
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 1
+          unit_of_measurement: "min"
+          mode: box
+
+    lower_hold_minutes:
+      name: "Lower Hold (minutes)"
+      description: >
+        Solar must stay below threshold for this many minutes before the
+        reserve is restored to normal. Longer than raise_hold to ride
+        out cloud cover while battery charges. Default: 10 minutes.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          unit_of_measurement: "min"
+          mode: box
 
     backup_reserve_number:
       name: "Battery Backup Reserve Number"
       description: >
-        Teslemetry number entity controlling the backup reserve percentage
+        Tesla Fleet number entity controlling the backup reserve percentage
         (e.g. number.the_grange_a_backup_reserve).
       selector:
         entity:
-          domain:
-            - number
+          domain: number
 
     battery_soc_sensor:
       name: "Battery SoC Sensor (optional)"
       description: >
-        Sensor reporting battery % charged. Used only for notification messages.
-        Leave empty if not needed.
+        Sensor reporting battery % charged. Used only for notification
+        messages. Leave empty if not needed.
       default:
       selector:
         entity:
-          domain:
-            - sensor
-          device_class:
-            - battery
+          domain: sensor
+          device_class: battery
 
     throttle_reserve_pct:
-      name: "Reserve % when throttling active"
+      name: "Reserve % when solar is high"
       description: >
-        Backup reserve to set when the dispatch signal turns ON.
-        100 forces the battery to charge from surplus solar.
+        Backup reserve to set when structural export exceeds the threshold.
+        100% forces the battery to charge from surplus solar.
       default: 100
       selector:
         number:
@@ -81,10 +142,10 @@ blueprint:
           mode: slider
 
     normal_reserve_pct:
-      name: "Reserve % when throttling released"
+      name: "Reserve % when solar is low"
       description: >
-        Backup reserve to restore once the dispatch signal turns OFF.
-        Set to your normal standby value (e.g. 20).
+        Backup reserve to restore when structural export drops below the
+        threshold. Set to your normal standby value (e.g. 20).
       default: 20
       selector:
         number:
@@ -94,58 +155,63 @@ blueprint:
           unit_of_measurement: "%"
           mode: slider
 
-    min_hold_seconds:
-      name: "Minimum hold time (seconds)"
-      description: >
-        After the reserve changes, do not react to another dispatch flip for at
-        least this many seconds. 900 = 15 minutes.
-      default: 900
-      selector:
-        number:
-          min: 60
-          max: 3600
-          step: 60
-          unit_of_measurement: "s"
-          mode: slider
-
     notify_service:
       name: "Notification service (optional)"
       description: >
         Service for reserve-change notifications, e.g.
-        notify.mobile_app_ralf_iphone. Leave empty to disable.
+        notify.mobile_app_ralfs_iphone. Leave empty to disable.
       default: ""
       selector:
         text:
 
 variables:
   phase_name: !input phase_name
-  dispatch_switch: !input dispatch_switch
+  solar_ct_sensor: !input solar_ct_sensor
+  load_sensor: !input load_sensor
+  solar_threshold_w: !input solar_threshold_w
   backup_reserve_number: !input backup_reserve_number
   battery_soc_sensor: !input battery_soc_sensor
   throttle_reserve_pct: !input throttle_reserve_pct
   normal_reserve_pct: !input normal_reserve_pct
-  min_hold_seconds: !input min_hold_seconds
   notify_service: !input notify_service
 
 trigger:
-  - platform: state
-    entity_id: !input dispatch_switch
-    to: "on"
-    id: dispatch_on
-  - platform: state
-    entity_id: !input dispatch_switch
-    to: "off"
-    id: dispatch_off
+  - platform: template
+    value_template: >
+      {{ states(solar_ct_sensor) | float(0) | abs
+         - states(load_sensor) | float(0) > solar_threshold_w }}
+    for:
+      minutes: !input raise_hold_minutes
+    id: solar_high
+
+  - platform: template
+    value_template: >
+      {{ states(solar_ct_sensor) | float(0) | abs
+         - states(load_sensor) | float(0) <= solar_threshold_w }}
+    for:
+      minutes: !input lower_hold_minutes
+    id: solar_low
 
 condition: []
 
 action:
+  - variables:
+      soc_str: >
+        {% if battery_soc_sensor %}
+          {{ states(battery_soc_sensor) | round(0) }}%
+        {% else %}
+          unknown
+        {% endif %}
+      structural_export_w: >
+        {{ (states(solar_ct_sensor) | float(0) | abs
+            - states(load_sensor) | float(0)) | round(0) }}
+
   - choose:
       - conditions:
           - condition: trigger
-            id: dispatch_on
+            id: solar_high
         sequence:
-          - alias: "Set reserve to throttle level"
+          - alias: "Raise reserve — solar genuinely high"
             service: number.set_value
             target:
               entity_id: !input backup_reserve_number
@@ -157,24 +223,17 @@ action:
             then:
               - service: "{{ notify_service }}"
                 data:
-                  title: "Solar throttling: {{ phase_name }} reserve raised"
-                  message: "{{ phase_name }}: GoodWe throttling active - reserve set to {{ throttle_reserve_pct }}%."
-          - alias: "Wait for dispatch to clear"
-            wait_for_trigger:
-              - platform: state
-                entity_id: !input dispatch_switch
-                to: "off"
-            timeout:
-              hours: 12
-            continue_on_timeout: true
-          - delay:
-              seconds: "{{ min_hold_seconds }}"
+                  title: "{{ phase_name }}: reserve raised to {{ throttle_reserve_pct }}%"
+                  message: >
+                    {{ phase_name }}: solar export {{ structural_export_w }}W exceeds
+                    threshold {{ solar_threshold_w }}W — reserve raised to
+                    {{ throttle_reserve_pct }}%. Battery SoC: {{ soc_str }}.
 
       - conditions:
           - condition: trigger
-            id: dispatch_off
+            id: solar_low
         sequence:
-          - alias: "Restore reserve to normal level"
+          - alias: "Restore reserve — solar sustainably low"
             service: number.set_value
             target:
               entity_id: !input backup_reserve_number
@@ -186,17 +245,10 @@ action:
             then:
               - service: "{{ notify_service }}"
                 data:
-                  title: "Solar throttling cleared: {{ phase_name }} reserve restored"
-                  message: "{{ phase_name }}: GoodWe throttling released - reserve restored to {{ normal_reserve_pct }}%."
-          - alias: "Wait for dispatch to re-activate"
-            wait_for_trigger:
-              - platform: state
-                entity_id: !input dispatch_switch
-                to: "on"
-            timeout:
-              hours: 12
-            continue_on_timeout: true
-          - delay:
-              seconds: "{{ min_hold_seconds }}"
+                  title: "{{ phase_name }}: reserve restored to {{ normal_reserve_pct }}%"
+                  message: >
+                    {{ phase_name }}: solar export {{ structural_export_w }}W below
+                    threshold {{ solar_threshold_w }}W — reserve restored to
+                    {{ normal_reserve_pct }}%. Battery SoC: {{ soc_str }}.
 
 mode: restart
