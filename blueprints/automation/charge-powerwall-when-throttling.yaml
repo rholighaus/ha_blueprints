@@ -202,7 +202,7 @@ action:
   - variables:
       soc_str: >
         {% if battery_soc_sensor %}
-          {{ states(battery_soc_sensor) | round(0) }}%
+          {{ states(battery_soc_sensor) | float(0) | round(0) }}%
         {% else %}
           unknown
         {% endif %}
