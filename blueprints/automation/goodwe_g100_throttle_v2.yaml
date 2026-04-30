@@ -396,7 +396,7 @@ action:
               pv_6k_w: >
                 {{ states(pv_sensor_6k) | float(0) }}
               solar_w: >
-                {{ states(solar_ct_sensor) | float(0) | abs }}
+                {{ states(solar_ct_sensor) | float(0) }}
               load_w: >
                 {{ states(load_power_sensor) | float(0) }}
               battery_w: >

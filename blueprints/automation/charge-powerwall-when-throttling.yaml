@@ -21,7 +21,7 @@ blueprint:
     Lower reserve: structural_export <= solar_threshold_w, sustained for
     lower_hold_minutes (longer to ride out brief cloud cover).
 
-    **Version: 2.0**
+    **Version: 2.1**
 
     Prerequisites:
       - Solar CT clamp sensor for the phase
@@ -178,7 +178,7 @@ variables:
 trigger:
   - platform: template
     value_template: >
-      {{ states(solar_ct_sensor) | float(0) | abs
+      {{ states(solar_ct_sensor) | float(0)
          - states(load_sensor) | float(0) > solar_threshold_w }}
     for:
       minutes: !input raise_hold_minutes
@@ -186,7 +186,7 @@ trigger:
 
   - platform: template
     value_template: >
-      {{ states(solar_ct_sensor) | float(0) | abs
+      {{ states(solar_ct_sensor) | float(0)
          - states(load_sensor) | float(0) <= solar_threshold_w }}
     for:
       minutes: !input lower_hold_minutes
@@ -203,7 +203,7 @@ action:
           unknown
         {% endif %}
       structural_export_w: >
-        {{ (states(solar_ct_sensor) | float(0) | abs
+        {{ (states(solar_ct_sensor) | float(0)
             - states(load_sensor) | float(0)) | round(0) }}
 
   - choose:
