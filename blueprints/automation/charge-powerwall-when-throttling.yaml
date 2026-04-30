@@ -21,7 +21,7 @@ blueprint:
     Lower reserve: structural_export <= solar_threshold_w, sustained for
     lower_hold_minutes (longer to ride out brief cloud cover).
 
-    **Version: 2.1**
+    **Version: 2.2**
 
     Prerequisites:
       - Solar CT clamp sensor for the phase
@@ -176,6 +176,10 @@ variables:
   notify_service: !input notify_service
 
 trigger:
+  - platform: homeassistant
+    event: start
+    id: ha_start
+
   - platform: template
     value_template: >
       {{ states(solar_ct_sensor) | float(0)
@@ -207,6 +211,23 @@ action:
             - states(load_sensor) | float(0)) | round(0) }}
 
   - choose:
+      - conditions:
+          - condition: trigger
+            id: ha_start
+        sequence:
+          - alias: "HA start: evaluate current solar and set reserve accordingly"
+            service: number.set_value
+            target:
+              entity_id: !input backup_reserve_number
+            data:
+              value: >
+                {% if states(solar_ct_sensor) | float(0)
+                      - states(load_sensor) | float(0) > solar_threshold_w %}
+                  {{ throttle_reserve_pct }}
+                {% else %}
+                  {{ normal_reserve_pct }}
+                {% endif %}
+
       - conditions:
           - condition: trigger
             id: solar_high
