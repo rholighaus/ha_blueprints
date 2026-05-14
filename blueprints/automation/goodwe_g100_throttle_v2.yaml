@@ -470,35 +470,25 @@ action:
                 {{ [[current_6k + ([-max_ramp_down, [delta_6k, max_ramp_up] | min] | max),
                      0] | max, 1000] | min | int }}
 
-          # Write 10kW inverter if changed
-          - if:
-              - condition: template
-                value_template: >
-                  {{ new_permille_10k | int != current_10k | int }}
-            then:
-              - service: input_number.set_value
-                target:
-                  entity_id: !input current_limit_helper_10k
-                data:
-                  value: "{{ new_permille_10k }}"
-              - service: "shell_command.{{ shell_command_10k }}"
-                data:
-                  value: "{{ new_permille_10k }}"
+          # Always write 10kW inverter (ensures register stays in sync with helper)
+          - service: input_number.set_value
+            target:
+              entity_id: !input current_limit_helper_10k
+            data:
+              value: "{{ new_permille_10k }}"
+          - service: "shell_command.{{ shell_command_10k }}"
+            data:
+              value: "{{ new_permille_10k }}"
 
-          # Write 6kW inverter if changed
-          - if:
-              - condition: template
-                value_template: >
-                  {{ new_permille_6k | int != current_6k | int }}
-            then:
-              - service: input_number.set_value
-                target:
-                  entity_id: !input current_limit_helper_6k
-                data:
-                  value: "{{ new_permille_6k }}"
-              - service: "shell_command.{{ shell_command_6k }}"
-                data:
-                  value: "{{ new_permille_6k }}"
+          # Always write 6kW inverter (ensures register stays in sync with helper)
+          - service: input_number.set_value
+            target:
+              entity_id: !input current_limit_helper_6k
+            data:
+              value: "{{ new_permille_6k }}"
+          - service: "shell_command.{{ shell_command_6k }}"
+            data:
+              value: "{{ new_permille_6k }}"
 
           # Load dispatch hysteresis
           - if:
