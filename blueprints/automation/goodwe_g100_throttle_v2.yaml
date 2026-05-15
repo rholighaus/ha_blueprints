@@ -303,7 +303,7 @@ max_exceeded: silent
 
 trigger:
   - platform: time_pattern
-    seconds: "/10"
+    seconds: "/5"
     id: periodic
   - platform: homeassistant
     event: start
