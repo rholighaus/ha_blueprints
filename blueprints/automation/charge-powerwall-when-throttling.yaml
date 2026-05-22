@@ -21,7 +21,7 @@ blueprint:
     Lower reserve: structural_export <= solar_threshold_w, sustained for
     lower_hold_minutes (longer to ride out brief cloud cover).
 
-    **Version: 2.3**
+    **Version: 2.4**
 
     Prerequisites:
       - Solar CT clamp sensor for the phase
@@ -155,6 +155,45 @@ blueprint:
           unit_of_measurement: "%"
           mode: slider
 
+    battery_power_sensor:
+      name: "Battery Power Sensor (optional)"
+      description: >
+        Sensor measuring battery charge/discharge power for this phase
+        (e.g. sensor.battery_c_power). Only used when
+        include_battery_in_forecast is true. Negative = charging,
+        positive = discharging.
+      default:
+      selector:
+        entity:
+          domain: sensor
+
+    include_battery_in_forecast:
+      name: "Include battery power in structural export forecast"
+      description: >
+        When enabled, the structural export formula becomes
+        solar_ct - load + battery_power. This accounts for battery
+        discharge adding to export, but makes the automation sensitive
+        to charging spikes (a 10kW charge reduces apparent structural
+        export by 10kW, potentially triggering a false solar_low event).
+        Default: off (recommended — solar_ct - load only).
+      default: false
+      selector:
+        boolean:
+
+    hold_switch:
+      name: "Hold Switch (optional)"
+      description: >
+        A switch or input_boolean that when ON prevents the reserve from
+        being lowered back to normal. Use this to block lowering while
+        pool heating or another high-priority load is actively running.
+        Leave empty if not needed.
+      default:
+      selector:
+        entity:
+          domain:
+            - switch
+            - input_boolean
+
     notify_service:
       name: "Notification service (optional)"
       description: >
@@ -171,6 +210,9 @@ variables:
   solar_threshold_w: !input solar_threshold_w
   backup_reserve_number: !input backup_reserve_number
   battery_soc_sensor: !input battery_soc_sensor
+  battery_power_sensor: !input battery_power_sensor
+  include_battery_in_forecast: !input include_battery_in_forecast
+  hold_switch: !input hold_switch
   throttle_reserve_pct: !input throttle_reserve_pct
   normal_reserve_pct: !input normal_reserve_pct
   notify_service: !input notify_service
@@ -182,16 +224,20 @@ trigger:
 
   - platform: template
     value_template: >
-      {{ states(solar_ct_sensor) | float(0)
-         - states(load_sensor) | float(0) > solar_threshold_w }}
+      {% set solar = states(solar_ct_sensor) | float(0) %}
+      {% set load = states(load_sensor) | float(0) %}
+      {% set battery = states(battery_power_sensor) | float(0) if (include_battery_in_forecast and battery_power_sensor) else 0 %}
+      {{ solar - load + battery > solar_threshold_w }}
     for:
       minutes: !input raise_hold_minutes
     id: solar_high
 
   - platform: template
     value_template: >
-      {{ states(solar_ct_sensor) | float(0)
-         - states(load_sensor) | float(0) <= solar_threshold_w }}
+      {% set solar = states(solar_ct_sensor) | float(0) %}
+      {% set load = states(load_sensor) | float(0) %}
+      {% set battery = states(battery_power_sensor) | float(0) if (include_battery_in_forecast and battery_power_sensor) else 0 %}
+      {{ solar - load + battery <= solar_threshold_w }}
     for:
       minutes: !input lower_hold_minutes
     id: solar_low
@@ -206,12 +252,19 @@ action:
         {% else %}
           unknown
         {% endif %}
+      battery_w: >
+        {{ states(battery_power_sensor) | float(0) if (include_battery_in_forecast and battery_power_sensor) else 0 }}
       structural_export_w: >
         {{ (states(solar_ct_sensor) | float(0)
-            - states(load_sensor) | float(0)) | round(0) }}
+            - states(load_sensor) | float(0)
+            + (states(battery_power_sensor) | float(0) if (include_battery_in_forecast and battery_power_sensor) else 0)) | round(0) }}
       solar_high_now: >
         {{ states(solar_ct_sensor) | float(0)
-           - states(load_sensor) | float(0) > solar_threshold_w }}
+           - states(load_sensor) | float(0)
+           + (states(battery_power_sensor) | float(0) if (include_battery_in_forecast and battery_power_sensor) else 0)
+           > solar_threshold_w }}
+      hold_active: >
+        {{ hold_switch != none and is_state(hold_switch, 'on') }}
       current_reserve: >
         {{ states(backup_reserve_number) | float(0) | round(0) }}
 
@@ -235,7 +288,7 @@ action:
             id: periodic
           - condition: template
             value_template: >
-              {{ not solar_high_now and current_reserve != normal_reserve_pct }}
+              {{ not solar_high_now and current_reserve != normal_reserve_pct and not hold_active }}
         sequence:
           - alias: "Periodic: solar low but reserve not restored — correct it"
             service: number.set_value
@@ -269,6 +322,8 @@ action:
       - conditions:
           - condition: trigger
             id: solar_low
+          - condition: template
+            value_template: "{{ not hold_active }}"
         sequence:
           - alias: "Restore reserve — solar sustainably low"
             service: number.set_value
