@@ -21,7 +21,12 @@ blueprint:
     Lower reserve: structural_export <= solar_threshold_w, sustained for
     lower_hold_minutes (longer to ride out brief cloud cover).
 
-    **Version: 2.4**
+    Octopus cheap-rate guard: the blueprint will never lower the reserve
+    during an Octopus cheap rate window (detected as current_rate < next_rate).
+    This covers both the fixed overnight Go window and any Intelligent dispatch
+    slots during the day, preventing conflict with the Octopus charging automation.
+
+    **Version: 2.5**
 
     Prerequisites:
       - Solar CT clamp sensor for the phase
@@ -216,6 +221,9 @@ variables:
   throttle_reserve_pct: !input throttle_reserve_pct
   normal_reserve_pct: !input normal_reserve_pct
   notify_service: !input notify_service
+  octopus_cheap_rate_active: >
+    {{ states('sensor.octopus_energy_electricity_25j0223825_2000012019734_current_rate') | float(999)
+       < states('sensor.octopus_energy_electricity_25j0223825_2000012019734_next_rate') | float(0) }}
 
 trigger:
   - platform: time_pattern
@@ -289,6 +297,8 @@ action:
           - condition: template
             value_template: >
               {{ not solar_high_now and current_reserve != normal_reserve_pct and not hold_active }}
+          - condition: template
+            value_template: "{{ not octopus_cheap_rate_active }}"
         sequence:
           - alias: "Periodic: solar low but reserve not restored — correct it"
             service: number.set_value
@@ -324,6 +334,8 @@ action:
             id: solar_low
           - condition: template
             value_template: "{{ not hold_active }}"
+          - condition: template
+            value_template: "{{ not octopus_cheap_rate_active }}"
         sequence:
           - alias: "Restore reserve — solar sustainably low"
             service: number.set_value
