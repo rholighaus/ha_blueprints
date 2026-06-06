@@ -17,23 +17,24 @@ pull-from-ha:
 	done
 
 # ── Copy all blueprints from Mac to HA via REST API ──────────────────────────
-# Uses shell_command.write_file — registered after HA restart
+# Uses shell_command.write_file — content is base64-encoded to safely handle
+# YAML special characters (quotes, colons, braces) in JSON payload
 sync-to-ha:
 	@if [ -z "$(HA_TOKEN)" ]; then \
 		echo "Error: ~/.ha_token not found or empty"; exit 1; \
 	fi
 	@find blueprints/automation -name "*.yaml" | while IFS= read -r f; do \
-		name=$$(basename "$$f"); \
-		content=$$(base64 < "$$f" | tr -d '\n'); \
-		http_code=$$(curl -s -o /tmp/sync_out.txt -w "%{http_code}" \
+		name=$(basename "$f"); \
+		content=$(base64 < "$f" | tr -d '\n'); \
+		http_code=$(curl -s -o /tmp/sync_out.txt -w "%{http_code}" \
 			-X POST "$(HA_URL)/api/services/shell_command/write_file" \
 			-H "Authorization: Bearer $(HA_TOKEN)" \
 			-H "Content-Type: application/json" \
-			-d "{\"path\": \"$(HA_PATH)/$$name\", \"content\": \"$$content\"}"); \
-		if [ "$$http_code" = "200" ]; then \
-			echo "→ HA: $$name"; \
+			-d "{\"path\": \"$(HA_PATH)/$name\", \"content\": \"$content\"}"); \
+		if [ "$http_code" = "200" ]; then \
+			echo "→ HA: $name"; \
 		else \
-			echo "✗ FAILED (HTTP $$http_code): $$name" && cat /tmp/sync_out.txt; \
+			echo "✗ FAILED (HTTP $http_code): $name" && cat /tmp/sync_out.txt; \
 		fi; \
 	done
 # ── Reload blueprints on HA ───────────────────────────────────────────────────
