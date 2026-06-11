@@ -2,6 +2,18 @@ HA_PATH  := /config/blueprints/automation/rholighaus
 HA_URL   := http://homeassistant.local:8123
 HA_TOKEN ?= $(shell cat ~/.ha_token 2>/dev/null | tr -d '[:space:]')
 
+# Automation IDs that use rholighaus blueprints — must be re-saved after any blueprint update
+# because HA does not recompile blueprint instances unless their stored config changes.
+BLUEPRINT_AUTOMATION_IDS := \
+	automation.grange_a_solar_battery_reserve \
+	automation.grange_b_solar_battery_reserve \
+	automation.grange_c_solar_battery_reserve \
+	automation.grange_a_charge_powerwall_when_throttling \
+	automation.grange_b_charge_powerwall_when_throttling \
+	automation.grange_c_charge_powerwall_when_throttling \
+	automation.octopus_go_tesla_optimisation \
+	automation.powerwall_backup_reserve_periodic_safety_reset
+
 # ── Push to GitHub ────────────────────────────────────────────────────────────
 push:
 	git add .
@@ -19,23 +31,48 @@ pull-from-ha:
 # ── Copy all blueprints from Mac to HA via REST API ──────────────────────────
 # Uses shell_command.write_file — content is base64-encoded to safely handle
 # YAML special characters (quotes, colons, braces) in JSON payload
+# python3 JSON-escapes the filename to handle spaces
 sync-to-ha:
 	@if [ -z "$(HA_TOKEN)" ]; then \
 		echo "Error: ~/.ha_token not found or empty"; exit 1; \
 	fi
 	@find blueprints/automation -name "*.yaml" | while IFS= read -r f; do \
 		name=$$(basename "$$f"); \
+		name_esc=$$(python3 -c "import json,sys; print(json.dumps(sys.argv[1])[1:-1])" "$$name"); \
 		content=$$(base64 < "$$f" | tr -d '\n'); \
 		http_code=$$(curl -s -o /tmp/sync_out.txt -w "%{http_code}" \
 			-X POST "$(HA_URL)/api/services/shell_command/write_file" \
 			-H "Authorization: Bearer $(HA_TOKEN)" \
 			-H "Content-Type: application/json" \
-			-d "{\"path\": \"$(HA_PATH)/$$name\", \"content\": \"$$content\"}"); \
+			-d "{\"path\": \"$(HA_PATH)/$$name_esc\", \"content\": \"$$content\"}"); \
 		if [ "$$http_code" = "200" ]; then \
 			echo "→ HA: $$name"; \
 		else \
 			echo "✗ FAILED (HTTP $$http_code): $$name" && cat /tmp/sync_out.txt; \
 		fi; \
+	done
+	@$(MAKE) resave-automations
+
+# ── Re-save all blueprint automation instances ────────────────────────────────
+# HA does not recompile blueprint instances on restart unless their stored
+# config changes. After any blueprint update, instances must be re-saved.
+resave-automations:
+	@if [ -z "$(HA_TOKEN)" ]; then \
+		echo "Error: ~/.ha_token not found or empty"; exit 1; \
+	fi
+	@echo "Re-saving blueprint automation instances..."
+	@for id in $(BLUEPRINT_AUTOMATION_IDS); do \
+		http_code=$$(curl -s -o /tmp/resave_out.txt -w "%{http_code}" \
+			-X POST "$(HA_URL)/api/services/automation/turn_on" \
+			-H "Authorization: Bearer $(HA_TOKEN)" \
+			-H "Content-Type: application/json" \
+			-d "{\"entity_id\": \"$$id\"}"); \
+		resave_code=$$(curl -s -o /tmp/resave_out.txt -w "%{http_code}" \
+			-X POST "$(HA_URL)/api/config/automation/config/$${id#automation.}" \
+			-H "Authorization: Bearer $(HA_TOKEN)" \
+			-H "Content-Type: application/json" \
+			-d "{}"); \
+		echo "  ↺ $$id ($$resave_code)"; \
 	done
 
 # ── Reload blueprints on HA ───────────────────────────────────────────────────
@@ -97,4 +134,4 @@ release:
 	@$(MAKE) sync-to-ha
 	@echo "Done. Create release notes at: https://github.com/rholighaus/ha_blueprints/releases"
 
-.PHONY: push pull-from-ha sync-to-ha reload-ha deploy bump-version bump-file release-file release
+.PHONY: push pull-from-ha sync-to-ha resave-automations reload-ha deploy bump-version bump-file release-file release
