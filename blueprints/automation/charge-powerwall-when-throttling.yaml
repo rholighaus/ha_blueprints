@@ -26,7 +26,7 @@ blueprint:
     This covers both the fixed overnight Go window and any Intelligent dispatch
     slots during the day, preventing conflict with the Octopus charging automation.
 
-    **Version: 2.6**
+    **Version: 2.7**
 
     Prerequisites:
       - Solar CT clamp sensor for the phase
@@ -222,8 +222,8 @@ variables:
   normal_reserve_pct: !input normal_reserve_pct
   notify_service: !input notify_service
   octopus_cheap_rate_active: >
-    {{ states('sensor.octopus_energy_electricity_k94c65582_2000012019734_current_rate') | float(999)
-       < states('sensor.octopus_energy_electricity_k94c65582_2000012019734_next_rate') | float(0) }}
+    {{ states('sensor.octopus_energy_electricity_25j0223825_2000012019734_current_rate') | float(999)
+       < states('sensor.octopus_energy_electricity_25j0223825_2000012019734_next_rate') | float(0) }}
 
 trigger:
   - platform: time_pattern
