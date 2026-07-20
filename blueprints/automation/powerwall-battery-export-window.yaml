@@ -1,0 +1,172 @@
+# =============================================================================
+# powerwall-battery-export-window.yaml
+#
+# DRAFT — v1.0 — not yet tested against a live Powerwall
+#
+# Design:
+#   Set ONE static utility tariff in the Tesla app (per the pjvenda "Force
+#   Export" pattern: https://github.com/pjvenda/powerwall-homeassistant-control)
+#   that always favours exporting from battery — sell price kept high
+#   relative to buy. That's a one-off manual edit in the Tesla app, never
+#   touched by this automation.
+#
+#   The actual on/off control for WHEN battery export happens is the native
+#   select.the_grange_{a,b,c}_allow_export entity, switched between:
+#     - "battery_ok" during the window  → battery may export to grid
+#     - resting_state outside it (default "pv_only") → only solar exports,
+#       battery is held back
+#
+#   This uses select.select_option — a built-in HA service — so there's no
+#   Fleet API JSON to construct, and no rest_command plumbing required.
+#   operation_mode is intentionally left untouched: the_grange_{a,b,c} sites
+#   are already permanently "autonomous" (Time-Based Control), which is what
+#   makes the tariff-driven export decision possible in the first place —
+#   confirmed live 2026-07-20 (select.the_grange_a_operation_mode = autonomous,
+#   select.the_grange_a_allow_export = battery_ok).
+#
+# Before relying on this:
+#   - Confirm the static tariff really does favour export whenever
+#     allow_export = battery_ok — Tesla's TBC optimizer evaluates live
+#     economics, not just a flag. If the Octopus export rate varies, revisit
+#     periodically (see powerwall-octopus-go-cheap-charging.yaml for the
+#     current_rate/next_rate comparison pattern already used elsewhere in
+#     this repo — the same pattern could drive window_start/window_end
+#     dynamically instead of the fixed defaults below).
+#   - Backup reserve isn't touched here — number.the_grange_{a,b,c}_backup_reserve
+#     stays wherever it's independently set; it's still the hard floor.
+#   - dry_run defaults to true: logs intent via persistent_notification
+#     instead of calling select.select_option.
+# =============================================================================
+
+blueprint:
+  name: Tesla Powerwall — Battery Export Window
+  description: >
+    Switches one or more Powerwall "Allow export" selects to battery_ok for
+    a defined window, and back to a resting state (default pv_only)
+    outside it. Assumes a static Tesla-app tariff already favours export
+    whenever battery_ok is set. DRAFT — verify with dry_run first.
+  domain: automation
+  source_url: https://github.com/rholighaus/ha_blueprints
+  input:
+    export_entities:
+      name: Allow export entities
+      description: >
+        The select.the_grange_a/b/c_allow_export entities to control
+        (pick one, two, or all three).
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: select
+
+    window_start:
+      name: Export window start
+      default: "20:00:00"
+      selector:
+        time:
+
+    window_end:
+      name: Export window end
+      default: "23:30:00"
+      selector:
+        time:
+
+    resting_state:
+      name: Resting state outside the window
+      description: >
+        never = block all export (even solar). pv_only = solar can still
+        export, battery is held back. pv_only is almost always what you want.
+      default: "pv_only"
+      selector:
+        select:
+          options:
+            - "pv_only"
+            - "never"
+
+    dry_run:
+      name: Dry run (log only, don't call select.select_option)
+      default: true
+      selector:
+        boolean:
+
+    notify_target:
+      name: Notify service (optional)
+      description: e.g. notify.mobile_app_ralfs_iphone — leave blank to skip.
+      default: ""
+      selector:
+        text:
+
+variables:
+  export_entities: !input export_entities
+  resting_state: !input resting_state
+  dry_run: !input dry_run
+  notify_target: !input notify_target
+
+trigger:
+  - platform: time
+    at: !input window_start
+    id: window_open
+  - platform: time
+    at: !input window_end
+    id: window_close
+
+action:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: window_open
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ dry_run }}"
+            then:
+              - service: persistent_notification.create
+                data:
+                  title: "Battery export window opening (DRY RUN)"
+                  message: >
+                    Would set {{ export_entities }} to battery_ok.
+            else:
+              - service: select.select_option
+                target:
+                  entity_id: "{{ export_entities }}"
+                data:
+                  option: "battery_ok"
+              - if:
+                  - condition: template
+                    value_template: "{{ notify_target != '' }}"
+                then:
+                  - service: "{{ notify_target }}"
+                    data:
+                      title: "Battery export window open"
+                      message: "{{ export_entities }} set to battery_ok."
+
+      - conditions:
+          - condition: trigger
+            id: window_close
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ dry_run }}"
+            then:
+              - service: persistent_notification.create
+                data:
+                  title: "Battery export window closing (DRY RUN)"
+                  message: >
+                    Would set {{ export_entities }} to {{ resting_state }}.
+            else:
+              - service: select.select_option
+                target:
+                  entity_id: "{{ export_entities }}"
+                data:
+                  option: "{{ resting_state }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ notify_target != '' }}"
+                then:
+                  - service: "{{ notify_target }}"
+                    data:
+                      title: "Battery export window closed"
+                      message: >
+                        {{ export_entities }} set to {{ resting_state }}.
+
+mode: single
