@@ -1,7 +1,7 @@
 # =============================================================================
 # powerwall-battery-export-window.yaml
 #
-# DRAFT — v1.0 — not yet tested against a live Powerwall
+# v2.0 — adds HA-restart resync (v1.0 only had the two time-edge triggers)
 #
 # Design:
 #   Set ONE static utility tariff in the Tesla app (per the pjvenda "Force
@@ -21,8 +21,17 @@
 #   operation_mode is intentionally left untouched: the_grange_{a,b,c} sites
 #   are already permanently "autonomous" (Time-Based Control), which is what
 #   makes the tariff-driven export decision possible in the first place —
-#   confirmed live 2026-07-20 (select.the_grange_a_operation_mode = autonomous,
-#   select.the_grange_a_allow_export = battery_ok).
+#   confirmed live 2026-07-20.
+#
+#   v2.0 adds a third trigger: `homeassistant: start`. On every HA restart,
+#   it evaluates the current time against window_start/window_end (native
+#   condition: time, which handles midnight-crossing automatically) and
+#   forces the export select to the correct state immediately — rather than
+#   leaving it however it happened to be when HA last stopped, and waiting
+#   up to ~24h for the next trigger edge to correct it. This is a deliberate
+#   "recompute on start" — it WILL override a manual toggle made before a
+#   restart, by design, since the whole point is deterministic time-of-day
+#   behaviour rather than persisted ad-hoc state.
 #
 # Before relying on this:
 #   - Confirm the static tariff really does favour export whenever
@@ -42,11 +51,15 @@ blueprint:
   name: Tesla Powerwall — Battery Export Window
   description: >
     Switches one or more Powerwall "Allow export" selects to battery_ok for
-    a defined window, and back to a resting state (default pv_only)
-    outside it. Assumes a static Tesla-app tariff already favours export
-    whenever battery_ok is set. DRAFT — verify with dry_run first.
+    a defined daily window, and back to a resting state (default pv_only)
+    outside it. Also re-evaluates the window on HA restart so state is
+    corrected immediately instead of waiting for the next trigger edge.
+    Assumes a static Tesla-app tariff already favours export whenever
+    battery_ok is set.
   domain: automation
   source_url: https://github.com/rholighaus/ha_blueprints
+  homeassistant:
+    min_version: "2024.10.0"
   input:
     export_entities:
       name: Allow export entities
@@ -102,16 +115,20 @@ variables:
   dry_run: !input dry_run
   notify_target: !input notify_target
 
-trigger:
-  - platform: time
+triggers:
+  - trigger: time
     at: !input window_start
     id: window_open
-  - platform: time
+  - trigger: time
     at: !input window_end
     id: window_close
+  - trigger: homeassistant
+    event: start
+    id: ha_start
 
-action:
+actions:
   - choose:
+      # ---------------- Window opens: allow battery export ----------------
       - conditions:
           - condition: trigger
             id: window_open
@@ -120,13 +137,12 @@ action:
               - condition: template
                 value_template: "{{ dry_run }}"
             then:
-              - service: persistent_notification.create
+              - action: persistent_notification.create
                 data:
                   title: "Battery export window opening (DRY RUN)"
-                  message: >
-                    Would set {{ export_entities }} to battery_ok.
+                  message: "Would set {{ export_entities }} to battery_ok."
             else:
-              - service: select.select_option
+              - action: select.select_option
                 target:
                   entity_id: "{{ export_entities }}"
                 data:
@@ -135,11 +151,12 @@ action:
                   - condition: template
                     value_template: "{{ notify_target != '' }}"
                 then:
-                  - service: "{{ notify_target }}"
+                  - action: "{{ notify_target }}"
                     data:
                       title: "Battery export window open"
                       message: "{{ export_entities }} set to battery_ok."
 
+      # ---------------- Window closes: restore resting state ---------------
       - conditions:
           - condition: trigger
             id: window_close
@@ -148,13 +165,12 @@ action:
               - condition: template
                 value_template: "{{ dry_run }}"
             then:
-              - service: persistent_notification.create
+              - action: persistent_notification.create
                 data:
                   title: "Battery export window closing (DRY RUN)"
-                  message: >
-                    Would set {{ export_entities }} to {{ resting_state }}.
+                  message: "Would set {{ export_entities }} to {{ resting_state }}."
             else:
-              - service: select.select_option
+              - action: select.select_option
                 target:
                   entity_id: "{{ export_entities }}"
                 data:
@@ -163,10 +179,49 @@ action:
                   - condition: template
                     value_template: "{{ notify_target != '' }}"
                 then:
-                  - service: "{{ notify_target }}"
+                  - action: "{{ notify_target }}"
                     data:
                       title: "Battery export window closed"
-                      message: >
-                        {{ export_entities }} set to {{ resting_state }}.
+                      message: "{{ export_entities }} set to {{ resting_state }}."
+
+      # ---------------- HA restart: resync to what "now" implies -----------
+      - conditions:
+          - condition: trigger
+            id: ha_start
+        sequence:
+          - if:
+              - condition: time
+                after: !input window_start
+                before: !input window_end
+            then:
+              - if:
+                  - condition: template
+                    value_template: "{{ dry_run }}"
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      title: "HA restart — within export window (DRY RUN)"
+                      message: "Would set {{ export_entities }} to battery_ok."
+                else:
+                  - action: select.select_option
+                    target:
+                      entity_id: "{{ export_entities }}"
+                    data:
+                      option: "battery_ok"
+            else:
+              - if:
+                  - condition: template
+                    value_template: "{{ dry_run }}"
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      title: "HA restart — outside export window (DRY RUN)"
+                      message: "Would set {{ export_entities }} to {{ resting_state }}."
+                else:
+                  - action: select.select_option
+                    target:
+                      entity_id: "{{ export_entities }}"
+                    data:
+                      option: "{{ resting_state }}"
 
 mode: single
