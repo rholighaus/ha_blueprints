@@ -1,0 +1,146 @@
+# =============================================================================
+# poe-battery-charge-limiter.yaml
+#
+# v1.0
+#
+# Design:
+#   Keeps a battery-powered device (iPad, phone, etc.) on a charge window
+#   rather than continuously topped up, by toggling the PoE power switch
+#   entity that supplies its charger/dock. Mirrors the low/high hysteresis
+#   pattern used for the Powerwall backup reserve blueprints in this repo,
+#   but driven by a simple battery_level sensor instead of Octopus rates.
+#
+#   Triggers:
+#     - numeric_state below low_threshold  -> turn PoE on  (needs charging)
+#     - numeric_state above high_threshold -> turn PoE off (fully charged)
+#     - homeassistant: start                -> resync immediately against
+#       current battery level, rather than waiting up to the next crossing
+#       (same rationale as the `homeassistant: start` branch added in
+#       powerwall-battery-export-window.yaml v2.0)
+#
+#   Intentionally NOT included:
+#     - No debounce/hold time on the threshold crossings — battery_level
+#       sensors from the HA Companion app update slowly and irregularly
+#       already (background push-triggered), so added debounce is unlikely
+#       to help and would only delay response further.
+#     - No "battery_state" (charging/not charging) check — PoE presence is
+#       the thing being controlled, so checking it would be circular.
+#
+# Before relying on this:
+#   - Companion app battery_level sensor updates are push-driven and can lag
+#     by minutes; this is a coarse charge window, not precise SoC control.
+#   - Confirm the poe_outlet_switch input is the *_poe suffixed "Outlet"
+#     entity, not the plain port data/link switch — see 2026-07-31 SW-Spa
+#     port 5 troubleshooting (wrong sibling entity toggles link, not power).
+#
+# Instances (created 2026-07-31):
+#   - Spa iPad:     sensor.spa_ipad_battery_level     / switch.sw_spa_poe_out_data_poe_5
+#   - Kitchen iPad:  sensor.kitchen_ipad_battery_level / switch.sw_upstairs_port_5_poe
+# =============================================================================
+
+blueprint:
+  name: PoE Battery Charge Limiter
+  description: >
+    Turns a PoE power switch on when a battery sensor drops below a low
+    threshold, and off when it rises above a high threshold — keeping a
+    PoE-charged device (tablet, phone) within a charge window instead of
+    trickle-charging continuously. Resyncs against current battery level
+    on HA restart.
+  domain: automation
+  source_url: https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/poe-battery-charge-limiter.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    devices:
+      name: Devices
+      icon: mdi:battery-charging
+      input:
+        battery_sensor:
+          name: Battery level sensor
+          description: The device's battery_level sensor (e.g. from HA Companion app).
+          selector:
+            entity:
+              domain: sensor
+              device_class: battery
+        poe_outlet_switch:
+          name: PoE outlet switch
+          description: >
+            The *_poe "Outlet" switch entity for the port supplying this
+            device's charger — not the plain port data/link switch.
+          selector:
+            entity:
+              domain: switch
+    settings:
+      name: Settings
+      icon: mdi:cog
+      collapsed: true
+      input:
+        low_threshold:
+          name: Low threshold (turn on)
+          default: 20
+          selector:
+            number: { min: 1, max: 99, unit_of_measurement: "%", mode: slider }
+        high_threshold:
+          name: High threshold (turn off)
+          default: 80
+          selector:
+            number: { min: 1, max: 99, unit_of_measurement: "%", mode: slider }
+
+mode: restart
+max_exceeded: silent
+
+variables:
+  low_threshold: !input low_threshold
+  high_threshold: !input high_threshold
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input battery_sensor
+    below: !input low_threshold
+    id: low
+  - trigger: numeric_state
+    entity_id: !input battery_sensor
+    above: !input high_threshold
+    id: high
+  - trigger: homeassistant
+    event: start
+    id: resync
+
+conditions: []
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: low
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: !input poe_outlet_switch
+      - conditions:
+          - condition: trigger
+            id: high
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input poe_outlet_switch
+      - conditions:
+          - condition: trigger
+            id: resync
+        sequence:
+          - variables:
+              current_level: "{{ states(battery_sensor) | float(0) }}"
+          - if:
+              - condition: template
+                value_template: "{{ current_level < low_threshold }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: !input poe_outlet_switch
+          - if:
+              - condition: template
+                value_template: "{{ current_level > high_threshold }}"
+            then:
+              - action: switch.turn_off
+                target:
+                  entity_id: !input poe_outlet_switch
