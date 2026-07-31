@@ -1,7 +1,7 @@
 # =============================================================================
 # poe-battery-charge-limiter.yaml
 #
-# v1.0
+# v1.1
 #
 # Design:
 #   Keeps a battery-powered device (iPad, phone, etc.) on a charge window
@@ -13,10 +13,28 @@
 #   Triggers:
 #     - numeric_state below low_threshold  -> turn PoE on  (needs charging)
 #     - numeric_state above high_threshold -> turn PoE off (fully charged)
-#     - homeassistant: start                -> resync immediately against
-#       current battery level, rather than waiting up to the next crossing
-#       (same rationale as the `homeassistant: start` branch added in
+#     - homeassistant: start                -> falls through to `default:`,
+#       which resyncs immediately against current battery level rather than
+#       waiting up to the next crossing (same rationale as the
+#       `homeassistant: start` branch added in
 #       powerwall-battery-export-window.yaml v2.0)
+#
+#   v1.1 fix #1: manually running the automation (UI "Run" button, or any
+#   call to automation.trigger without a real trigger context) previously did
+#   NOTHING — the choose action only matched on trigger id (low/high/resync),
+#   and a manual run has no trigger id, so no branch matched. Replaced the
+#   third `resync`-only branch with a `default:` on the choose action, so
+#   ANY run without a matching low/high trigger id (manual run OR HA restart)
+#   falls through to the same current-level resync logic. This also makes
+#   the homeassistant:start trigger's `id: resync` unnecessary — removed.
+#
+#   v1.1 fix #2: the resync/default sequence templated `states(battery_sensor)`
+#   but `battery_sensor` was never bound as a top-level `variables:` entry
+#   (only low_threshold/high_threshold were) — present since v1.0, silently
+#   uncaught because the old resync-only branch never actually ran until fix
+#   #1 exposed it via a manual test run (UndefinedError: 'battery_sensor' is
+#   undefined). Added `battery_sensor: !input battery_sensor` alongside the
+#   other two variables.
 #
 #   Intentionally NOT included:
 #     - No debounce/hold time on the threshold crossings — battery_level
@@ -90,6 +108,7 @@ mode: restart
 max_exceeded: silent
 
 variables:
+  battery_sensor: !input battery_sensor
   low_threshold: !input low_threshold
   high_threshold: !input high_threshold
 
@@ -104,7 +123,6 @@ triggers:
     id: high
   - trigger: homeassistant
     event: start
-    id: resync
 
 conditions: []
 
@@ -124,23 +142,23 @@ actions:
           - action: switch.turn_off
             target:
               entity_id: !input poe_outlet_switch
-      - conditions:
-          - condition: trigger
-            id: resync
-        sequence:
-          - variables:
-              current_level: "{{ states(battery_sensor) | float(0) }}"
-          - if:
-              - condition: template
-                value_template: "{{ current_level < low_threshold }}"
-            then:
-              - action: switch.turn_on
-                target:
-                  entity_id: !input poe_outlet_switch
-          - if:
-              - condition: template
-                value_template: "{{ current_level > high_threshold }}"
-            then:
-              - action: switch.turn_off
-                target:
-                  entity_id: !input poe_outlet_switch
+    default:
+      # Covers: HA restart, and any manual/no-context run (e.g. UI "Run"
+      # button) where trigger.id doesn't match low/high — resync against
+      # the battery sensor's current value instead of doing nothing.
+      - variables:
+          current_level: "{{ states(battery_sensor) | float(0) }}"
+      - if:
+          - condition: template
+            value_template: "{{ current_level < low_threshold }}"
+        then:
+          - action: switch.turn_on
+            target:
+              entity_id: !input poe_outlet_switch
+      - if:
+          - condition: template
+            value_template: "{{ current_level > high_threshold }}"
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id: !input poe_outlet_switch
