@@ -17,12 +17,11 @@ blueprint:
 
     Predicted export formula:
       predicted_export = solar_ct_power - load_power + min(battery_power, 0)
-      load_power = Tesla Fleet load sensor (kW×1000) if available and not
-      unavailable, else Shelly CT clamp load sensor (W). Tesla sensor is
-      preferred as it correctly measures all loads including EV chargers
-      whose CT clamp position may miss them. Falls back to Shelly on
-      cloud/internet outage (conservative — may over-throttle).
-      Battery discharge excluded (feeds local loads not grid).
+      load_power = Tesla Fleet load sensor (kW×1000) if available, else
+      local Powerwall integration sensor (kW×1000) if available, else
+      Shelly CT clamp (W). Priority: Tesla Fleet → local Powerwall → CT clamp.
+      Tesla and local Powerwall include EV charger load missed by CT clamp.
+      Falls back conservatively (may over-throttle) on cloud/internet outage.
 
     Proportional throttle split:
       cut_10k = excess * rated_10k / (rated_10k + rated_6k)
@@ -165,11 +164,22 @@ blueprint:
       name: Tesla Fleet Load Power Sensor (optional, kW)
       description: >
         Tesla Fleet sensor measuring total load on this phase in kW
-        (e.g. sensor.the_grange_a_load_power). More accurate than the
-        Shelly CT clamp as it includes loads not seen by the CT clamp
-        position (e.g. EV charger). Falls back to CT clamp load sensor
-        if this sensor is unavailable (cloud outage). Leave empty to
-        always use the CT clamp.
+        (e.g. sensor.the_grange_a_load_power). Most accurate — includes
+        all loads. Falls back to local_load_sensor then CT clamp if
+        unavailable (cloud outage). Leave empty to skip.
+      default:
+      selector:
+        entity:
+          domain: sensor
+
+    local_load_sensor:
+      name: Local Powerwall Load Power Sensor (optional, kW)
+      description: >
+        Local Tesla Powerwall integration sensor measuring total load
+        in kW (e.g. sensor.garages_powerwall_a_load_power). Used as
+        fallback when tesla_load_sensor is unavailable (internet outage).
+        More accurate than Shelly CT clamp. 30s poll interval.
+        Leave empty to skip.
       default:
       selector:
         entity:
@@ -358,6 +368,7 @@ variables:
   solar_ct_sensor: !input solar_ct_sensor
   load_power_sensor: !input load_power_sensor
   tesla_load_sensor: !input tesla_load_sensor
+  local_load_sensor: !input local_load_sensor
   battery_power_sensor: !input battery_power_sensor
   grid_power_sensor: !input grid_power_sensor
 
@@ -378,6 +389,8 @@ action:
               load_w_start: >
                 {% if tesla_load_sensor and states(tesla_load_sensor) not in ['unavailable', 'unknown'] %}
                   {{ states(tesla_load_sensor) | float(0) * 1000 }}
+                {% elif local_load_sensor and states(local_load_sensor) not in ['unavailable', 'unknown'] %}
+                  {{ states(local_load_sensor) | float(0) * 1000 }}
                 {% else %}
                   {{ states(load_power_sensor) | float(0) }}
                 {% endif %}
@@ -442,6 +455,8 @@ action:
               load_w: >
                 {% if tesla_load_sensor and states(tesla_load_sensor) not in ['unavailable', 'unknown'] %}
                   {{ states(tesla_load_sensor) | float(0) * 1000 }}
+                {% elif local_load_sensor and states(local_load_sensor) not in ['unavailable', 'unknown'] %}
+                  {{ states(local_load_sensor) | float(0) * 1000 }}
                 {% else %}
                   {{ states(load_power_sensor) | float(0) }}
                 {% endif %}
