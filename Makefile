@@ -8,11 +8,11 @@ BLUEPRINT_AUTOMATION_IDS := \
 	automation.grange_a_solar_battery_reserve \
 	automation.grange_b_solar_battery_reserve \
 	automation.grange_c_solar_battery_reserve \
-	automation.grange_a_charge_powerwall_when_throttling \
-	automation.grange_b_charge_powerwall_when_throttling \
-	automation.grange_c_charge_powerwall_when_throttling \
 	automation.octopus_go_tesla_optimisation \
 	automation.powerwall_backup_reserve_periodic_safety_reset
+# Note: automation.grange_{a,b,c}_charge_powerwall_when_throttling removed
+# 2026-07-20 — these entity IDs don't exist; the real automations for
+# charge-powerwall-when-throttling.yaml are the *_solar_battery_reserve ones above.
 
 # ── Push to GitHub ────────────────────────────────────────────────────────────
 push:
@@ -62,16 +62,13 @@ resave-automations:
 	fi
 	@echo "Re-saving blueprint automation instances..."
 	@for id in $(BLUEPRINT_AUTOMATION_IDS); do \
-		http_code=$$(curl -s -o /tmp/resave_out.txt -w "%{http_code}" \
-			-X POST "$(HA_URL)/api/services/automation/turn_on" \
-			-H "Authorization: Bearer $(HA_TOKEN)" \
-			-H "Content-Type: application/json" \
-			-d "{\"entity_id\": \"$$id\"}"); \
+		config=$$(curl -s -X GET "$(HA_URL)/api/config/automation/config/$${id#automation.}" \
+			-H "Authorization: Bearer $(HA_TOKEN)"); \
 		resave_code=$$(curl -s -o /tmp/resave_out.txt -w "%{http_code}" \
 			-X POST "$(HA_URL)/api/config/automation/config/$${id#automation.}" \
 			-H "Authorization: Bearer $(HA_TOKEN)" \
 			-H "Content-Type: application/json" \
-			-d "{}"); \
+			-d "$$config"); \
 		echo "  ↺ $$id ($$resave_code)"; \
 	done
 
