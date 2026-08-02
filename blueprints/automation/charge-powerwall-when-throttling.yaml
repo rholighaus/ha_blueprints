@@ -26,7 +26,12 @@ blueprint:
     This covers both the fixed overnight Go window and any Intelligent dispatch
     slots during the day, preventing conflict with the Octopus charging automation.
 
-    **Version: 2.7**
+    **Version: 2.8**
+
+    New in 2.8: optional Tesla operation mode switching.
+      - Solar high → self_consumption (prevents grid import to charge battery)
+      - Solar low / sunset → autonomous (enables Octopus overnight optimisation)
+      Controlled by the optional operation_mode_select input.
 
     Prerequisites:
       - Solar CT clamp sensor for the phase
@@ -199,6 +204,19 @@ blueprint:
             - switch
             - input_boolean
 
+    operation_mode_select:
+      name: "Tesla Operation Mode Select (optional)"
+      description: >
+        Tesla Fleet select entity controlling the Powerwall operation mode
+        (e.g. select.the_grange_a_operation_mode). When provided:
+        - Solar high → self_consumption (prevents grid import to charge)
+        - Solar low / sunset → autonomous (enables Octopus optimisation)
+        Leave empty to disable mode switching.
+      default:
+      selector:
+        entity:
+          domain: select
+
     notify_service:
       name: "Notification service (optional)"
       description: >
@@ -218,6 +236,7 @@ variables:
   battery_power_sensor: !input battery_power_sensor
   include_battery_in_forecast: !input include_battery_in_forecast
   hold_switch: !input hold_switch
+  operation_mode_select: !input operation_mode_select
   throttle_reserve_pct: !input throttle_reserve_pct
   normal_reserve_pct: !input normal_reserve_pct
   notify_service: !input notify_service
@@ -229,6 +248,10 @@ trigger:
   - platform: time_pattern
     minutes: "/1"
     id: periodic
+
+  - platform: sun
+    event: sunset
+    id: sunset
 
   - platform: template
     value_template: >
@@ -275,6 +298,8 @@ action:
         {{ hold_switch != none and is_state(hold_switch, 'on') }}
       current_reserve: >
         {{ states(backup_reserve_number) | float(0) | round(0) }}
+      current_mode: >
+        {{ states(operation_mode_select) if operation_mode_select else '' }}
 
   - choose:
       - conditions:
@@ -290,6 +315,15 @@ action:
               entity_id: !input backup_reserve_number
             data:
               value: "{{ throttle_reserve_pct }}"
+          - if:
+              - condition: template
+                value_template: "{{ operation_mode_select not in ['', none] and current_mode != 'self_consumption' }}"
+            then:
+              - service: select.select_option
+                target:
+                  entity_id: !input operation_mode_select
+                data:
+                  option: self_consumption
 
       - conditions:
           - condition: trigger
@@ -306,6 +340,15 @@ action:
               entity_id: !input backup_reserve_number
             data:
               value: "{{ normal_reserve_pct }}"
+          - if:
+              - condition: template
+                value_template: "{{ operation_mode_select not in ['', none] and current_mode != 'autonomous' }}"
+            then:
+              - service: select.select_option
+                target:
+                  entity_id: !input operation_mode_select
+                data:
+                  option: autonomous
 
       - conditions:
           - condition: trigger
@@ -317,6 +360,15 @@ action:
               entity_id: !input backup_reserve_number
             data:
               value: "{{ throttle_reserve_pct }}"
+          - if:
+              - condition: template
+                value_template: "{{ operation_mode_select not in ['', none] }}"
+            then:
+              - service: select.select_option
+                target:
+                  entity_id: !input operation_mode_select
+                data:
+                  option: self_consumption
           - if:
               - condition: template
                 value_template: "{{ notify_service != '' }}"
@@ -345,6 +397,15 @@ action:
               value: "{{ normal_reserve_pct }}"
           - if:
               - condition: template
+                value_template: "{{ operation_mode_select not in ['', none] }}"
+            then:
+              - service: select.select_option
+                target:
+                  entity_id: !input operation_mode_select
+                data:
+                  option: autonomous
+          - if:
+              - condition: template
                 value_template: "{{ notify_service != '' }}"
             then:
               - service: "{{ notify_service }}"
@@ -354,5 +415,25 @@ action:
                     {{ phase_name }}: solar export {{ structural_export_w }}W below
                     threshold {{ solar_threshold_w }}W — reserve restored to
                     {{ normal_reserve_pct }}%. Battery SoC: {{ soc_str }}.
+
+      - conditions:
+          - condition: trigger
+            id: sunset
+        sequence:
+          - alias: "Sunset — hand off to autonomous/Octopus overnight optimisation"
+            service: number.set_value
+            target:
+              entity_id: !input backup_reserve_number
+            data:
+              value: "{{ normal_reserve_pct }}"
+          - if:
+              - condition: template
+                value_template: "{{ operation_mode_select not in ['', none] }}"
+            then:
+              - service: select.select_option
+                target:
+                  entity_id: !input operation_mode_select
+                data:
+                  option: autonomous
 
 mode: restart
