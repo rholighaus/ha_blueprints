@@ -17,10 +17,12 @@ blueprint:
 
     Predicted export formula:
       predicted_export = solar_ct_power - load_power + min(battery_power, 0)
-      Battery charging (negative) reduces predicted export and is included.
-      Battery discharging (positive) feeds local loads not the grid and is
-      excluded to avoid unnecessary throttling when battery powers EV etc.
-      The grid safety backstop catches any real over-export.
+      load_power = Tesla Fleet load sensor (kW×1000) if available and not
+      unavailable, else Shelly CT clamp load sensor (W). Tesla sensor is
+      preferred as it correctly measures all loads including EV chargers
+      whose CT clamp position may miss them. Falls back to Shelly on
+      cloud/internet outage (conservative — may over-throttle).
+      Battery discharge excluded (feeds local loads not grid).
 
     Proportional throttle split:
       cut_10k = excess * rated_10k / (rated_10k + rated_6k)
@@ -152,11 +154,26 @@ blueprint:
       name: CT Clamp Load Power Sensor
       description: >
         Shelly EM3 CT clamp measuring house load on this phase
-        (e.g. sensor.load_c_power). Positive = consuming.
+        (e.g. sensor.load_c_power). Positive = consuming. Used as
+        fallback when tesla_load_sensor is unavailable.
       selector:
         entity:
           domain: sensor
           device_class: power
+
+    tesla_load_sensor:
+      name: Tesla Fleet Load Power Sensor (optional, kW)
+      description: >
+        Tesla Fleet sensor measuring total load on this phase in kW
+        (e.g. sensor.the_grange_a_load_power). More accurate than the
+        Shelly CT clamp as it includes loads not seen by the CT clamp
+        position (e.g. EV charger). Falls back to CT clamp load sensor
+        if this sensor is unavailable (cloud outage). Leave empty to
+        always use the CT clamp.
+      default:
+      selector:
+        entity:
+          domain: sensor
 
     battery_power_sensor:
       name: CT Clamp Battery Power Sensor
@@ -340,6 +357,7 @@ variables:
   pv_sensor_6k: !input pv_sensor_6k
   solar_ct_sensor: !input solar_ct_sensor
   load_power_sensor: !input load_power_sensor
+  tesla_load_sensor: !input tesla_load_sensor
   battery_power_sensor: !input battery_power_sensor
   grid_power_sensor: !input grid_power_sensor
 
@@ -357,7 +375,12 @@ action:
               current_10k: "{{ states(current_limit_helper_10k) | float(1000) }}"
               current_6k: "{{ states(current_limit_helper_6k) | float(1000) }}"
               solar_w_start: "{{ states(solar_ct_sensor) | float(0) }}"
-              load_w_start: "{{ states(load_power_sensor) | float(0) }}"
+              load_w_start: >
+                {% if tesla_load_sensor and states(tesla_load_sensor) not in ['unavailable', 'unknown'] %}
+                  {{ states(tesla_load_sensor) | float(0) * 1000 }}
+                {% else %}
+                  {{ states(load_power_sensor) | float(0) }}
+                {% endif %}
               battery_w_start: "{{ states(battery_power_sensor) | float(0) }}"
               predicted_start_w: "{{ solar_w_start - load_w_start + [battery_w_start, 0] | min }}"
               safety_target_start_w: "{{ g100_limit_w * (1 - safety_margin_pct / 100) }}"
@@ -417,7 +440,11 @@ action:
               solar_w: >
                 {{ states(solar_ct_sensor) | float(0) }}
               load_w: >
-                {{ states(load_power_sensor) | float(0) }}
+                {% if tesla_load_sensor and states(tesla_load_sensor) not in ['unavailable', 'unknown'] %}
+                  {{ states(tesla_load_sensor) | float(0) * 1000 }}
+                {% else %}
+                  {{ states(load_power_sensor) | float(0) }}
+                {% endif %}
               battery_w: >
                 {{ states(battery_power_sensor) | float(0) }}
               total_rated_w: >
