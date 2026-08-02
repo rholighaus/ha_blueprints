@@ -16,14 +16,13 @@ blueprint:
         load fluctuations never push the phase over the limit.
 
     Predicted export formula:
-      predicted_export = pv_10k_w + pv_6k_w - load_power + min(battery_power, 0)
-      Uses PV generation (not CT clamp solar) to avoid feedback loop:
-      CT clamp measures throttled inverter output, so using it causes
-      throttle → solar drops → predicted drops → ramp up → solar rises →
-      throttle again. PV power reflects true panel potential regardless
-      of throttle ceiling.
-      Battery charging (negative) is included; discharging (positive) is
-      excluded as it feeds local loads not the grid.
+      predicted_export = min(pv_10k / throttle_10k, rated_10k)
+                       + min(pv_6k / throttle_6k, rated_6k)
+                       - load + min(battery, 0)
+      Back-calculates unthrottled PV potential by dividing current PV
+      output by the current throttle fraction, capped at rated power.
+      Avoids feedback loop where throttled output is mistaken for true
+      panel potential. Battery discharge excluded (feeds local loads).
 
     Proportional throttle split:
       cut_10k = excess * rated_10k / (rated_10k + rated_6k)
@@ -432,14 +431,16 @@ action:
                    and states(pv_sensor_6k) not in ['unavailable', 'unknown'] }}
 
           - variables:
-              # Feed-forward predicted export using actual PV generation (not CT clamp)
-              # CT clamp measures inverter OUTPUT which is already throttled — using it
-              # creates a feedback loop: throttle → solar_w drops → predicted drops →
-              # ramp up → solar_w rises → predicted rises → throttle again.
-              # PV power reflects what panels CAN generate regardless of throttle ceiling,
-              # giving a true picture of potential export.
+              # Feed-forward predicted export using back-calculated unthrottled PV potential.
+              # PV sensors report throttled output, so dividing by the current throttle
+              # fraction gives the true panel potential regardless of current limit.
+              # Capped at rated power to avoid extrapolation errors at very low throttle.
+              # Battery charging (negative) included; discharging (positive) excluded
+              # as it feeds local loads not the grid.
               predicted_export_w: >
-                {{ pv_10k_w + pv_6k_w - load_w + [battery_w, 0] | min }}
+                {{ [pv_10k_w / ((current_10k / 1000) if current_10k > 0 else 1), rated_w_10k] | min
+                   + [pv_6k_w / ((current_6k / 1000) if current_6k > 0 else 1), rated_w_6k] | min
+                   - load_w + [battery_w, 0] | min }}
               # Safety target: g100_limit minus safety margin
               safety_target_w: >
                 {{ g100_limit_w * (1 - safety_margin_pct / 100) }}
