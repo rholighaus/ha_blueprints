@@ -1,7 +1,7 @@
 # =============================================================================
 # poe-battery-charge-limiter.yaml
 #
-# v1.1
+# v1.2
 #
 # Design:
 #   Keeps a battery-powered device (iPad, phone, etc.) on a charge window
@@ -13,6 +13,8 @@
 #   Triggers:
 #     - numeric_state below low_threshold  -> turn PoE on  (needs charging)
 #     - numeric_state above high_threshold -> turn PoE off (fully charged)
+#     - state held unchanged for stale_after -> turn PoE on unconditionally
+#       (safety net; see v1.2 note below)
 #     - homeassistant: start                -> falls through to `default:`,
 #       which resyncs immediately against current battery level rather than
 #       waiting up to the next crossing (same rationale as the
@@ -35,6 +37,20 @@
 #   #1 exposed it via a manual test run (UndefinedError: 'battery_sensor' is
 #   undefined). Added `battery_sensor: !input battery_sensor` alongside the
 #   other two variables.
+#
+#   v1.2: added a stale-data safety net. The Spa iPad died with PoE stuck
+#   off — its Companion-app battery_level had last reported 75% hours
+#   earlier, never crossing below low_threshold before the device died and
+#   stopped pushing updates (iOS throttles/stops background app activity as
+#   a device gets critically low or powers off). The 20/80% hysteresis only
+#   works if the sensor keeps reporting all the way down, which isn't
+#   guaranteed. Added a `state` trigger with `for: stale_after` (default 4h)
+#   on battery_sensor — if the reading hasn't changed (i.e. no new push) in
+#   that long, turn PoE on unconditionally, on the assumption a live/awake
+#   device reports far more often than that. Caveat: `for:` duration clocks
+#   reset on every HA restart, so a restart delays stale detection by up to
+#   stale_after from restart time — acceptable here since worst case is a
+#   late safety-net trigger, not a missed one.
 #
 #   Intentionally NOT included:
 #     - No debounce/hold time on the threshold crossings — battery_level
@@ -103,6 +119,18 @@ blueprint:
           default: 80
           selector:
             number: { min: 1, max: 99, unit_of_measurement: "%", mode: slider }
+        stale_after:
+          name: Stale-data safety net
+          description: >
+            If the battery sensor hasn't reported an update in this long,
+            turn PoE on regardless of the last known level. Protects
+            against a device that dies or goes unreachable before ever
+            reporting a reading below the low threshold.
+          default:
+            hours: 4
+          selector:
+            duration:
+              enable_day: false
 
 mode: restart
 max_exceeded: silent
@@ -121,6 +149,10 @@ triggers:
     entity_id: !input battery_sensor
     above: !input high_threshold
     id: high
+  - trigger: state
+    entity_id: !input battery_sensor
+    for: !input stale_after
+    id: stale
   - trigger: homeassistant
     event: start
 
@@ -140,6 +172,13 @@ actions:
             id: high
         sequence:
           - action: switch.turn_off
+            target:
+              entity_id: !input poe_outlet_switch
+      - conditions:
+          - condition: trigger
+            id: stale
+        sequence:
+          - action: switch.turn_on
             target:
               entity_id: !input poe_outlet_switch
     default:
