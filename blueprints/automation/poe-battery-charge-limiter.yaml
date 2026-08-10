@@ -1,7 +1,7 @@
 # =============================================================================
 # poe-battery-charge-limiter.yaml
 #
-# v1.2
+# v1.3
 #
 # Design:
 #   Keeps a battery-powered device (iPad, phone, etc.) on a charge window
@@ -13,8 +13,9 @@
 #   Triggers:
 #     - numeric_state below low_threshold  -> turn PoE on  (needs charging)
 #     - numeric_state above high_threshold -> turn PoE off (fully charged)
-#     - state held unchanged for stale_after -> turn PoE on unconditionally
-#       (safety net; see v1.2 note below)
+#     - state held unchanged for stale_after -> turn PoE on ONLY IF the last
+#       known reading was below high_threshold (safety net; see v1.2/v1.3
+#       notes below)
 #     - homeassistant: start                -> falls through to `default:`,
 #       which resyncs immediately against current battery level rather than
 #       waiting up to the next crossing (same rationale as the
@@ -51,6 +52,22 @@
 #   reset on every HA restart, so a restart delays stale detection by up to
 #   stale_after from restart time — acceptable here since worst case is a
 #   late safety-net trigger, not a missed one.
+#
+#   v1.3: the Spa iPad reached 100%, PoE correctly turned off, then the
+#   Companion app simply stopped pushing updates for hours (idle + fully
+#   charged + unplugged — nothing to report, so iOS didn't wake it as
+#   often; NOT the device dying, unlike the v1.2 scenario). The v1.2 stale
+#   trigger fired anyway after 4h and turned PoE back ON unconditionally —
+#   wrong, since the last known level (100%) gave no reason to think it
+#   needed charging. Worse, once on, it could never turn back off: the
+#   high_threshold trigger only fires on a fresh crossing, and a frozen
+#   sensor never produces one, so it stayed on indefinitely (silent return
+#   of the exact trickle-charging problem this blueprint exists to avoid).
+#   Fix: gated the stale branch with a template condition — only turn PoE
+#   on if the last known reading is below high_threshold. A device stuck
+#   stale near/above high_threshold is left alone (most likely just idle
+#   and fine); a device stuck stale below high_threshold still gets the
+#   v1.2 protection against silently dying before crossing low_threshold.
 #
 #   Intentionally NOT included:
 #     - No debounce/hold time on the threshold crossings — battery_level
@@ -177,6 +194,8 @@ actions:
       - conditions:
           - condition: trigger
             id: stale
+          - condition: template
+            value_template: "{{ states(battery_sensor) | float(0) < high_threshold }}"
         sequence:
           - action: switch.turn_on
             target:
