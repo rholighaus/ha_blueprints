@@ -1,6 +1,7 @@
 HA_PATH  := /config/blueprints/automation/rholighaus
 HA_URL   := http://homeassistant.local:8123
 HA_TOKEN ?= $(shell cat ~/.ha_token 2>/dev/null | tr -d '[:space:]')
+HA_SSH   := root@homeassistant.local
 
 # Automation IDs that use rholighaus blueprints — must be re-saved after any blueprint update
 # because HA does not recompile blueprint instances unless their stored config changes.
@@ -22,35 +23,22 @@ push:
 
 # ── Pull all blueprints from HA to Mac ───────────────────────────────────────
 pull-from-ha:
-	@ssh homeassistant "ls '$(HA_PATH)'/*.yaml" | while IFS= read -r f; do \
+	@ssh $(HA_SSH) 'ls $(HA_PATH)/*.yaml' | while IFS= read -r f; do \
 		name=$$(basename "$$f"); \
-		ssh homeassistant "cat \"$$f\"" > "blueprints/automation/$$name" && \
+		scp -q $(HA_SSH):"$$f" "blueprints/automation/$$name" && \
 		echo "← HA: $$name"; \
 	done
 
-# ── Copy all blueprints from Mac to HA via REST API ──────────────────────────
-# Uses shell_command.write_file — content is base64-encoded to safely handle
-# YAML special characters (quotes, colons, braces) in JSON payload
-# python3 JSON-escapes the filename to handle spaces
+# ── Copy all blueprints from Mac to HA via SCP ───────────────────────────────
+# SCP is reliable with YAML special characters — no base64 or JSON escaping needed.
+# After copying, reload HA and resave automation instances to recompile blueprints.
 sync-to-ha:
-	@if [ -z "$(HA_TOKEN)" ]; then \
-		echo "Error: ~/.ha_token not found or empty"; exit 1; \
-	fi
 	@find blueprints/automation -name "*.yaml" | while IFS= read -r f; do \
 		name=$$(basename "$$f"); \
-		name_esc=$$(python3 -c "import json,sys; print(json.dumps(sys.argv[1])[1:-1])" "$$name"); \
-		content=$$(base64 < "$$f" | tr -d '\n'); \
-		http_code=$$(curl -s -o /tmp/sync_out.txt -w "%{http_code}" \
-			-X POST "$(HA_URL)/api/services/shell_command/write_file" \
-			-H "Authorization: Bearer $(HA_TOKEN)" \
-			-H "Content-Type: application/json" \
-			-d "{\"path\": \"$(HA_PATH)/$$name_esc\", \"content\": \"$$content\"}"); \
-		if [ "$$http_code" = "200" ]; then \
-			echo "→ HA: $$name"; \
-		else \
-			echo "✗ FAILED (HTTP $$http_code): $$name" && cat /tmp/sync_out.txt; \
-		fi; \
+		scp -q "$$f" $(HA_SSH):$(HA_PATH)/"$$name" && \
+		echo "→ HA: $$name"; \
 	done
+	@$(MAKE) reload-ha
 	@$(MAKE) resave-automations
 
 # ── Re-save all blueprint automation instances ────────────────────────────────
