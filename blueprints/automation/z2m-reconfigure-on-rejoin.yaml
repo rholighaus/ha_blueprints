@@ -1,0 +1,212 @@
+# =============================================================================
+# z2m-reconfigure-on-rejoin.yaml
+#
+# v1.0
+#
+# Design:
+#   Some Tuya TS0601 devices (seen on Zemismart ZM25RX-08/30 battery blind
+#   motors, _TZE200_bv1jcqqu) go silent after rejoining the Zigbee network:
+#   they stay "online" in Z2M but ignore commands until "Reconfigure" is
+#   clicked. Reconfigure resends Tuya's magic packet / data query and the
+#   bindings, which wakes them up again.
+#
+#   This blueprint automates that click: it listens on the Z2M bridge event
+#   topic and, when any selected device sends device_announce or
+#   device_joined, publishes a configure request for it.
+#
+#   Triggers:
+#     - mqtt <base_topic>/bridge/event, filtered to device_announce /
+#       device_joined from one of the selected devices
+#
+#   Device matching: devices are picked with a device selector; their IEEE
+#   addresses are extracted from the HA device identifiers
+#   (zigbee2mqtt_0x...), so renaming a device in Z2M doesn't break matching.
+#
+#   Retries: battery devices may doze off mid-configure, so the request is
+#   retried up to max_attempts, waiting for a matching "ok" on
+#   <base_topic>/bridge/response/device/configure.
+#
+#   Notifications:
+#     - persistent notification on every run (optional; useful to confirm
+#       the diagnosis — if a device hangs WITHOUT a notification, the cause
+#       is not a rejoin)
+#     - push via notify_service only when configure fails after all attempts
+#
+#   dry_run: notifies only, no configure is sent.
+#
+#   No homeassistant: start resync branch: rejoin events are not state, so
+#   there is nothing to resync. A manual "Run" also does nothing (no trigger
+#   payload to match) — test by publishing a fake device_announce to
+#   <base_topic>/bridge/event instead.
+# =============================================================================
+
+blueprint:
+  name: Z2M – reconfigure devices after rejoin (v1.0)
+  description: >
+    v1.0 — Sends a Zigbee2MQTT "configure" request when any selected device
+    re-announces or rejoins the network. Fixes Tuya TS0601 devices (e.g. blind
+    motors) that go silent after a rejoin until reconfigured. Retries because
+    battery devices may be asleep. Dry-run mode only notifies.
+  domain: automation
+  author: Ralf
+  source_url: https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/z2m-reconfigure-on-rejoin.yaml
+  input:
+    base_topic:
+      name: Z2M base topic
+      description: MQTT base topic of the Zigbee2MQTT instance (e.g. zigbee2mqtt_1).
+      default: zigbee2mqtt
+      selector:
+        text: {}
+    devices:
+      name: Devices to watch
+      description: Zigbee2MQTT devices that should be reconfigured after a rejoin.
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: mqtt
+    max_attempts:
+      name: Max attempts
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: box
+    retry_delay:
+      name: Delay between attempts (seconds)
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 300
+          unit_of_measurement: s
+          mode: box
+    persistent_notify:
+      name: Persistent notification on every run
+      default: true
+      selector:
+        boolean: {}
+    notify_service:
+      name: Push notify service on failure
+      description: >
+        Full action name, e.g. notify.mobile_app_ralfs_iphone. Only used when
+        configure fails after all attempts. Leave empty to disable.
+      default: notify.mobile_app_ralfs_iphone
+      selector:
+        text: {}
+    dry_run:
+      name: Dry run (notify only, don't send configure)
+      default: false
+      selector:
+        boolean: {}
+
+mode: queued
+max: 10
+
+trigger_variables:
+  base: !input base_topic
+
+triggers:
+  - trigger: mqtt
+    topic: "{{ base }}/bridge/event"
+
+variables:
+  devices: !input devices
+  attempts: !input max_attempts
+  retry_delay: !input retry_delay
+  persistent_notify: !input persistent_notify
+  notify_service: !input notify_service
+  dry_run: !input dry_run
+  watched: >
+    {% set ns = namespace(l=[]) %}
+    {% for d in devices %}
+      {% for i in (device_attr(d, 'identifiers') or []) %}
+        {% set ns.l = ns.l + (i[1] | string | regex_findall('0x[0-9a-fA-F]{16}')) %}
+      {% endfor %}
+    {% endfor %}
+    {{ ns.l | map('lower') | list }}
+
+conditions:
+  - condition: template
+    value_template: >
+      {{ trigger is defined and trigger.payload_json is defined
+         and trigger.payload_json.type in ['device_announce', 'device_joined']
+         and (trigger.payload_json.data.ieee_address | lower) in watched }}
+
+actions:
+  - variables:
+      ieee: "{{ trigger.payload_json.data.ieee_address }}"
+      name: "{{ trigger.payload_json.data.friendly_name | default(ieee) }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ dry_run }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          title: "Z2M reconfigure (dry run)"
+          message: >
+            {{ name }} sent {{ trigger.payload_json.type }} on {{ base }} —
+            would have sent configure.
+      - stop: Dry run
+
+  - delay: "00:00:05"
+
+  - repeat:
+      sequence:
+        - action: mqtt.publish
+          data:
+            topic: "{{ base }}/bridge/request/device/configure"
+            payload: "{{ {'id': ieee} | to_json }}"
+        - wait_for_trigger:
+            - trigger: mqtt
+              topic: "{{ base }}/bridge/response/device/configure"
+          timeout: "00:00:30"
+          continue_on_timeout: true
+        - if:
+            - condition: template
+              value_template: >
+                {{ not (wait.trigger is not none
+                        and wait.trigger.payload_json.status == 'ok'
+                        and wait.trigger.payload_json.data.id == ieee)
+                   and repeat.index < attempts }}
+          then:
+            - delay:
+                seconds: "{{ retry_delay }}"
+      until:
+        - condition: template
+          value_template: >
+            {{ (wait.trigger is not none
+                and wait.trigger.payload_json.status == 'ok'
+                and wait.trigger.payload_json.data.id == ieee)
+               or repeat.index >= attempts }}
+
+  - variables:
+      ok: >
+        {{ wait.trigger is not none
+           and wait.trigger.payload_json.status == 'ok'
+           and wait.trigger.payload_json.data.id == ieee }}
+
+  - if:
+      - condition: template
+        value_template: "{{ persistent_notify }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          title: "Z2M device reconfigured"
+          message: >
+            {{ name }} re-announced on {{ base }}; configure
+            {{ 'succeeded' if ok else 'FAILED after ' ~ attempts ~ ' attempts' }}.
+
+  - if:
+      - condition: template
+        value_template: "{{ not ok and (notify_service | string | trim) != '' }}"
+    then:
+      - action: "{{ notify_service }}"
+        continue_on_error: true
+        data:
+          title: "Z2M reconfigure failed"
+          message: >
+            {{ name }} re-announced on {{ base }} but configure failed after
+            {{ attempts }} attempts — it may still be unresponsive.
