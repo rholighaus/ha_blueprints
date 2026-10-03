@@ -1,73 +1,76 @@
 # =============================================================================
 # z2m-reconfigure-on-rejoin.yaml
 #
-# v2.0
+# v3.0
 #
 # Design:
 #   Some Tuya TS0601 battery blind motors (Zemismart ZM25RX-08/30,
 #   _TZE200_bv1jcqqu) periodically stop acting on commands while staying on
-#   the network: Z2M sends the command without error, HA shows the optimistic
-#   state, but the motor neither moves nor reports. Clicking "Reconfigure" in
-#   Z2M (resends Tuya's magic packet / data query + bindings) wakes it up.
+#   the network: Z2M sends the command without error, the motor doesn't
+#   move, and it may even report a bogus position (seen 2026-10-03: right
+#   blind reported 100 -> 75 without physically moving). Clicking
+#   "Reconfigure" in Z2M wakes it up.
 #
-#   This blueprint automates that, with two triggers:
+#   Three triggers, one automation (mode parallel):
 #
-#   1. COMMAND WATCHDOG (v2.0, the main fix)
-#      - state trigger on the selected covers, to open/closed (ignores
-#        attribute-only changes and unavailable/unknown transitions). Z2M
-#        publishes the optimistic state the moment it sends a command, so this
-#        catches commands from any source (dashboard, Z2M frontend, other
-#        automations such as "Sync Ralf's Blinds").
-#      - skipped if current_position already equals the target (open=100,
-#        closed=0) - e.g. the device itself reporting arrival.
-#      - waits move_timeout seconds for current_position to change. These
-#        motors report position once, at end of travel (<60 s full travel),
-#        so the default is 75 s.
-#      - no movement -> configure (with retries) -> re-send open/close once ->
-#        wait again -> notify result.
-#      - loop-safe: re-sending the same command does not change the cover's
-#        state, so it cannot re-trigger the watchdog.
-#      - limitation: set_cover_position to an intermediate position is not
-#        re-sent (target unknown); only open/close are recovered.
+#   1. COMMAND (call_service event, domain cover)
+#      - open_cover / close_cover / set_cover_position / stop_cover calls
+#        naming one of the selected covers (directly or via a cover group,
+#        which re-calls the service with its members).
+#      - for each matched blind, fires a `z2m_blind_watchdog` event carrying
+#        entity, kind, target_pos (open=100, close=0, set=requested) and
+#        start_pos, tagged with this automation's entity_id as `source`.
+#      - catches repeated presses (no state change needed). Commands sent
+#        from the Z2M frontend bypass HA and are NOT watched.
 #
-#   2. REJOIN WATCHER (v1.0 behaviour, kept)
-#      - mqtt <base>/bridge/event, device_announce / device_joined from one of
-#        the selected covers' devices -> configure. 2026-10-03 diagnosis showed
-#        the hang happens WITHOUT an address change (Z2M health: leave_count 0,
-#        network_address_changes 0), so this branch is a cheap extra, not the
-#        fix.
+#   2. CHECK (z2m_blind_watchdog event from this automation)
+#      - skipped if kind is stop_cover, or the blind is already within +-5
+#        of the target (avoids daily reconfigures from timed automations).
+#      - healthy = current_position reaches target +-5 within move_timeout
+#        (default 75 s; full travel < 60 s). A position change that doesn't
+#        reach the target (bogus report) counts as STUCK.
+#      - a newer command or a stop for the same blind supersedes the check
+#        (the newer command starts its own check), so Stop and quick
+#        reversals never cause a re-send.
+#      - stuck -> configure (retries) -> re-send ONCE straight to Z2M via
+#        MQTT <base>/<ieee>/set ({"state": OPEN|CLOSE} or {"position": N}),
+#        bypassing the HA cover service so the re-send can't re-trigger the
+#        watchdog -> check again -> notify.
+#
+#   3. ANNOUNCE (mqtt <base>/bridge/event)
+#      - device_announce / device_joined from a selected blind -> configure.
+#        Kept from v1.0 as a cheap extra; the diagnosed hang does not
+#        involve a rejoin.
 #
 #   Device matching: IEEE addresses are derived from each cover's HA device
-#   identifiers (zigbee2mqtt_0x...), so renaming in Z2M doesn't break it.
+#   identifiers (zigbee2mqtt_0x...).
 #
-#   dry_run (default ON): detects and notifies only - no configure, no re-send.
+#   dry_run (default ON): detects and notifies only - no configure, no
+#   re-send.
 #
-#   No homeassistant: start branch: nothing to resync (events, not state).
-#   A manual "Run" does nothing (no trigger context).
-#
-#   Testing:
-#     - rejoin branch: publish a fake
-#       {"type":"device_announce","data":{"ieee_address":"0x..."}} to
-#       <base>/bridge/event
-#     - watchdog: send open/close to a blind; with a healthy blind nothing
-#       should happen (position changes within the timeout).
+#   No homeassistant: start branch (nothing to resync). Manual "Run" does
+#   nothing.
 #
 #   History:
-#     v1.0 (2026-10-03) rejoin watcher only, device selector input.
-#     v2.0 (2026-10-03) command watchdog added; input changed from devices to
-#          cover entities (BREAKING - existing instances must be re-saved
-#          with `covers`); dry_run now defaults to true; mode parallel.
+#     v1.0 (2026-10-03) rejoin watcher only.
+#     v2.0 (2026-10-03) state-trigger watchdog; any position change = healthy.
+#          Failed live test: bogus position report counted as movement, and
+#          repeated presses didn't trigger (no state change).
+#     v3.0 (2026-10-03) call_service trigger, reach-target criterion,
+#          set_cover_position support, stop/supersede guard, MQTT re-send.
+#          Inputs unchanged from v2.0.
 # =============================================================================
 
 blueprint:
-  name: Z2M – recover stuck blinds (reconfigure + resend) (v2.0)
+  name: Z2M – recover stuck blinds (reconfigure + resend) (v3.0)
   description: >
-    v2.0 — Watchdog for Zigbee2MQTT battery blind motors (e.g. Tuya TS0601)
+    v3.0 — Watchdog for Zigbee2MQTT battery blind motors (e.g. Tuya TS0601)
     that stop acting on commands until reconfigured. When a selected cover is
-    commanded open/close and its position doesn't change within the timeout,
-    sends a Z2M "configure" request and re-sends the command once. Also
-    reconfigures a cover's device when it re-announces/rejoins.
-    Dry run (default) only notifies.
+    commanded (open/close/set position) from HA and doesn't reach the target
+    position within the timeout, sends a Z2M "configure" request and re-sends
+    the command once. A Stop or newer command cancels the check. Also
+    reconfigures a blind when it re-announces/rejoins. Dry run (default)
+    only notifies.
   domain: automation
   author: Ralf
   source_url: https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/z2m-reconfigure-on-rejoin.yaml
@@ -90,8 +93,8 @@ blueprint:
     move_timeout:
       name: Movement timeout (seconds)
       description: >
-        How long to wait for current_position to change after a command
-        before treating the blind as stuck. Set above full travel time.
+        How long the blind has to reach the commanded position before it is
+        treated as stuck. Set above full travel time.
       default: 75
       selector:
         number:
@@ -125,8 +128,8 @@ blueprint:
       name: Push notify service on failure
       description: >
         Full action name, e.g. notify.mobile_app_ralfs_iphone. Used when
-        configure fails, or the blind still doesn't move after the re-send.
-        Leave empty to disable.
+        configure fails, or the blind still doesn't reach the target after the
+        re-send. Leave empty to disable.
       default: notify.mobile_app_ralfs_iphone
       selector:
         text: {}
@@ -137,21 +140,20 @@ blueprint:
         boolean: {}
 
 mode: parallel
-max: 10
+max: 25
 
 trigger_variables:
   base: !input base_topic
 
 triggers:
-  - trigger: state
+  - trigger: event
     id: command
-    entity_id: !input covers
-    to:
-      - "open"
-      - "closed"
-    not_from:
-      - "unavailable"
-      - "unknown"
+    event_type: call_service
+    event_data:
+      domain: cover
+  - trigger: event
+    id: check
+    event_type: z2m_blind_watchdog
   - trigger: mqtt
     id: announce
     topic: "{{ base }}/bridge/event"
@@ -164,6 +166,7 @@ variables:
   persistent_notify: !input persistent_notify
   notify_service: !input notify_service
   dry_run: !input dry_run
+  self_id: "{{ this.entity_id }}"
   covers_info: >
     {% set ns = namespace(l=[]) %}
     {% for c in covers %}
@@ -175,52 +178,108 @@ variables:
       {% endfor %}
     {% endfor %}
     {{ ns.l }}
+  # --- command trigger ---
+  svc: >
+    {% if trigger.id == 'command' %}{{ trigger.event.data.get('service', '') }}{% endif %}
+  matched: >
+    {% if trigger.id == 'command' %}
+      {% set e = (trigger.event.data.get('service_data') or {}).get('entity_id') or [] %}
+      {% set ids = (e.split(',') | map('trim') | list) if e is string else (e | list) %}
+      {{ ids | select('in', covers) | list }}
+    {% else %}[]{% endif %}
+  # --- announce trigger ---
   event_type: >
     {% if trigger.id == 'announce' and trigger.payload_json is defined
           and trigger.payload_json is mapping %}{{ trigger.payload_json.get('type', '') }}{% endif %}
   ann_ieee: >
     {% if trigger.id == 'announce' and trigger.payload_json is defined
           and trigger.payload_json is mapping %}{{ (trigger.payload_json.get('data') or {}).get('ieee_address', '') | lower }}{% endif %}
+  # --- check trigger ---
+  kind: >
+    {% if trigger.id == 'check' %}{{ trigger.event.data.get('kind', '') }}{% endif %}
+  target_pos: >
+    {{ (trigger.event.data.get('target_pos', -1) | int(-1)) if trigger.id == 'check' else -1 }}
+  start_pos: >
+    {{ (trigger.event.data.get('start_pos', -1) | int(-1)) if trigger.id == 'check' else -1 }}
+  # --- common ---
   entity: >
-    {% if trigger.id == 'announce' %}{{ (covers_info | selectattr('ieee', 'eq', ann_ieee) | map(attribute='entity') | first) | default('') }}{% else %}{{ trigger.entity_id }}{% endif %}
+    {% if trigger.id == 'check' %}{{ trigger.event.data.get('entity', '') }}{% elif trigger.id == 'announce' %}{{ (covers_info | selectattr('ieee', 'eq', ann_ieee) | map(attribute='entity') | first) | default('') }}{% endif %}
   ieee: >
-    {% if trigger.id == 'announce' %}{{ ann_ieee }}{% else %}{{ (covers_info | selectattr('entity', 'eq', trigger.entity_id) | map(attribute='ieee') | first) | default('') }}{% endif %}
+    {% if trigger.id == 'announce' %}{{ ann_ieee }}{% elif trigger.id == 'check' %}{{ (covers_info | selectattr('entity', 'eq', entity) | map(attribute='ieee') | first) | default('') }}{% endif %}
   name: >
     {{ (state_attr(entity, 'friendly_name') if entity else none) or ieee }}
-  target_state: >
-    {{ trigger.to_state.state if trigger.id == 'command' else '' }}
-  target_pos: >
-    {{ 100 if target_state == 'open' else 0 }}
-  start_pos: >
-    {{ (state_attr(entity, 'current_position') | int(-1)) if entity else -1 }}
 
 conditions:
   - condition: template
     value_template: >
-      {{ (trigger.id == 'announce'
-          and event_type in ['device_announce', 'device_joined']
-          and entity != '')
-         or (trigger.id == 'command'
+      {{ (trigger.id == 'command'
+          and svc in ['open_cover', 'close_cover', 'set_cover_position', 'stop_cover']
+          and matched | count > 0)
+         or (trigger.id == 'check'
+          and trigger.event.data.get('source') == self_id
+          and kind != 'stop_cover'
           and ieee != ''
-          and start_pos | int != target_pos | int) }}
+          and target_pos >= 0
+          and (start_pos - target_pos) | abs > 5)
+         or (trigger.id == 'announce'
+          and event_type in ['device_announce', 'device_joined']
+          and entity != '') }}
 
 actions:
-  # --- Watchdog: give the blind a chance to move first -----------------------
+  # === 1. COMMAND: hand each matched blind to its own check run ==============
   - if:
       - condition: trigger
         id: command
     then:
-      - wait_template: >
-          {{ state_attr(entity, 'current_position') | int(-1) != start_pos | int }}
-        timeout: "{{ move_timeout | int }}"
-        continue_on_timeout: true
+      - repeat:
+          for_each: "{{ matched }}"
+          sequence:
+            - event: z2m_blind_watchdog
+              event_data:
+                source: "{{ self_id }}"
+                entity: "{{ repeat.item }}"
+                kind: "{{ svc }}"
+                target_pos: >
+                  {% if svc == 'open_cover' %}100{% elif svc == 'close_cover' %}0{% elif svc == 'set_cover_position' %}{{ (trigger.event.data.get('service_data') or {}).get('position', -1) | int(-1) }}{% else %}-1{% endif %}
+                start_pos: "{{ state_attr(repeat.item, 'current_position') | int(-1) }}"
+      - stop: Handed to watchdog
+
+  # === 2. CHECK: wait for the blind to reach the target =====================
+  - variables:
+      outcome: pending
+      deadline: "{{ now().timestamp() + (move_timeout | int) }}"
+      recovered: true
+  - if:
+      - condition: trigger
+        id: check
+    then:
+      - repeat:
+          sequence:
+            - wait_for_trigger:
+                - trigger: template
+                  value_template: >
+                    {{ ((state_attr(entity, 'current_position') | int(-1)) - target_pos) | abs <= 5 }}
+                - trigger: event
+                  event_type: z2m_blind_watchdog
+              timeout: "{{ [deadline - now().timestamp(), 0] | max }}"
+              continue_on_timeout: true
+            - variables:
+                outcome: >
+                  {% if wait.trigger is none %}timeout
+                  {% elif wait.trigger.event is not defined %}reached
+                  {% elif wait.trigger.event.data.get('entity') == entity
+                       and wait.trigger.event.data.get('source') == self_id %}superseded
+                  {% else %}pending{% endif %}
+          until:
+            - condition: template
+              value_template: "{{ outcome != 'pending' }}"
       - if:
           - condition: template
-            value_template: "{{ wait.completed }}"
+            value_template: "{{ outcome in ['reached', 'superseded'] }}"
         then:
-          - stop: Blind moved - healthy
+          - stop: "Blind {{ outcome }} - no action needed"
 
-  # --- Dry run: report what would happen -------------------------------------
+  # === Dry run ===============================================================
   - if:
       - condition: template
         value_template: "{{ dry_run }}"
@@ -229,9 +288,11 @@ actions:
         data:
           title: "Z2M blind recovery (dry run)"
           message: >
-            {% if trigger.id == 'command' %}{{ name }} was commanded {{ target_state }}
-            but didn't move within {{ move_timeout }} s — would reconfigure and re-send.{% else %}{{ name }}
-            sent {{ event_type }} on {{ base }} — would reconfigure.{% endif %}
+            {% if trigger.id == 'check' %}{{ name }}: {{ kind }} to {{ target_pos }}
+            but it didn't get there within {{ move_timeout }} s (position now
+            {{ state_attr(entity, 'current_position') }}) — would reconfigure
+            and re-send.{% else %}{{ name }} sent {{ event_type }} on {{ base }}
+            — would reconfigure.{% endif %}
       - stop: Dry run
 
   - if:
@@ -240,7 +301,7 @@ actions:
     then:
       - delay: "00:00:05"
 
-  # --- Configure, with retries -----------------------------------------------
+  # === Configure, with retries (check + announce) ============================
   - repeat:
       sequence:
         - action: mqtt.publish
@@ -275,27 +336,47 @@ actions:
         {{ wait.trigger is not none
            and wait.trigger.payload_json.status == 'ok'
            and wait.trigger.payload_json.data.id == ieee }}
-      recovered: true
 
-  # --- Watchdog: re-send the command once and check it moves -----------------
+  # === CHECK: re-send once straight to Z2M, then verify ======================
   - if:
       - condition: trigger
-        id: command
+        id: check
       - condition: template
         value_template: "{{ ok }}"
     then:
       - delay: "00:00:03"
-      - action: "cover.{{ 'open_cover' if target_state == 'open' else 'close_cover' }}"
-        target:
-          entity_id: "{{ entity }}"
-      - wait_template: >
-          {{ state_attr(entity, 'current_position') | int(-1) != start_pos | int }}
-        timeout: "{{ move_timeout | int }}"
-        continue_on_timeout: true
+      - action: mqtt.publish
+        data:
+          topic: "{{ base }}/{{ ieee }}/set"
+          payload: >
+            {% if kind == 'open_cover' %}{{ {'state': 'OPEN'} | to_json }}{% elif kind == 'close_cover' %}{{ {'state': 'CLOSE'} | to_json }}{% else %}{{ {'position': target_pos} | to_json }}{% endif %}
       - variables:
-          recovered: "{{ wait.completed }}"
+          outcome: pending
+          deadline: "{{ now().timestamp() + (move_timeout | int) }}"
+      - repeat:
+          sequence:
+            - wait_for_trigger:
+                - trigger: template
+                  value_template: >
+                    {{ ((state_attr(entity, 'current_position') | int(-1)) - target_pos) | abs <= 5 }}
+                - trigger: event
+                  event_type: z2m_blind_watchdog
+              timeout: "{{ [deadline - now().timestamp(), 0] | max }}"
+              continue_on_timeout: true
+            - variables:
+                outcome: >
+                  {% if wait.trigger is none %}timeout
+                  {% elif wait.trigger.event is not defined %}reached
+                  {% elif wait.trigger.event.data.get('entity') == entity
+                       and wait.trigger.event.data.get('source') == self_id %}superseded
+                  {% else %}pending{% endif %}
+          until:
+            - condition: template
+              value_template: "{{ outcome != 'pending' }}"
+      - variables:
+          recovered: "{{ outcome != 'timeout' }}"
 
-  # --- Notifications ---------------------------------------------------------
+  # === Notifications =========================================================
   - if:
       - condition: template
         value_template: "{{ persistent_notify }}"
@@ -304,9 +385,9 @@ actions:
         data:
           title: "Z2M blind recovery"
           message: >
-            {% if trigger.id == 'command' %}{{ name }} didn't move after "{{ target_state }}".
-            Configure {{ 'ok' if ok else 'FAILED after ' ~ attempts ~ ' attempts' }}{% if ok %};
-            re-sent command — {{ 'blind moved' if recovered else 'STILL NOT MOVING' }}{% endif %}.{% else %}{{ name }}
+            {% if trigger.id == 'check' %}{{ name }} didn't reach {{ target_pos }}
+            after {{ kind }}. Configure {{ 'ok' if ok else 'FAILED after ' ~ attempts ~ ' attempts' }}{% if ok %};
+            re-sent — {{ 'reached target' if outcome == 'reached' else ('superseded by a newer command' if outcome == 'superseded' else 'STILL NOT THERE (position ' ~ state_attr(entity, 'current_position') ~ ')') }}{% endif %}.{% else %}{{ name }}
             sent {{ event_type }}; configure
             {{ 'succeeded' if ok else 'FAILED after ' ~ attempts ~ ' attempts' }}.{% endif %}
 
@@ -322,5 +403,5 @@ actions:
           message: >
             {{ name }}:
             {{ 'configure failed after ' ~ attempts ~ ' attempts'
-               if not ok else 're-sent ' ~ target_state ~ ' but it still did not move' }}.
+               if not ok else 're-sent ' ~ kind ~ ' but it still did not reach ' ~ target_pos }}.
             Try Reconfigure in Z2M or check the motor.
