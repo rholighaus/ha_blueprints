@@ -1,7 +1,7 @@
 # =============================================================================
 # z2m-reconfigure-on-rejoin.yaml
 #
-# v3.0
+# v3.1
 #
 # Design:
 #   Some Tuya TS0601 battery blind motors (Zemismart ZM25RX-08/30,
@@ -26,9 +26,14 @@
 #   2. CHECK (z2m_blind_watchdog event from this automation)
 #      - skipped if kind is stop_cover, or the blind is already within +-5
 #        of the target (avoids daily reconfigures from timed automations).
-#      - healthy = current_position reaches target +-5 within move_timeout
-#        (default 75 s; full travel < 60 s). A position change that doesn't
-#        reach the target (bogus report) counts as STUCK.
+#      - healthy = the blind's own Z2M state message (<base>/<friendly
+#        name>) reports position within +-5 of target, at least 1 s after
+#        the check started (skips Z2M's optimistic echo), within
+#        move_timeout (default 35 s; measured full travel ~19 s). A report
+#        that doesn't reach the target (bogus value) counts as STUCK.
+#        Residual gap: an unrelated message from a stuck blind (e.g. a
+#        battery report) after a set_cover_position would echo the cached
+#        optimistic target and count as reached.
 #      - a newer command or a stop for the same blind supersedes the check
 #        (the newer command starts its own check), so Stop and quick
 #        reversals never cause a re-send.
@@ -59,12 +64,20 @@
 #     v3.0 (2026-10-03) call_service trigger, reach-target criterion,
 #          set_cover_position support, stop/supersede guard, MQTT re-send.
 #          Inputs unchanged from v2.0.
+#     v3.1 (2026-10-03) "reached" is now judged from the blind's own Z2M
+#          state messages (<base>/<friendly name>), not HA's stored
+#          position: Z2M writes the TARGET into position within ~50 ms of a
+#          set_cover_position command (optimistic), so v3.0 saw "reached"
+#          instantly for position commands (e.g. from "Sync Ralf's
+#          Blinds"). Messages within 1 s of the check starting are ignored.
+#          Default move_timeout 75 -> 35 s (measured full travel ~19 s,
+#          Ralf left blind). Inputs unchanged.
 # =============================================================================
 
 blueprint:
-  name: Z2M – recover stuck blinds (reconfigure + resend) (v3.0)
+  name: Z2M – recover stuck blinds (reconfigure + resend) (v3.1)
   description: >
-    v3.0 — Watchdog for Zigbee2MQTT battery blind motors (e.g. Tuya TS0601)
+    v3.1 — Watchdog for Zigbee2MQTT battery blind motors (e.g. Tuya TS0601)
     that stop acting on commands until reconfigured. When a selected cover is
     commanded (open/close/set position) from HA and doesn't reach the target
     position within the timeout, sends a Z2M "configure" request and re-sends
@@ -95,7 +108,7 @@ blueprint:
       description: >
         How long the blind has to reach the commanded position before it is
         treated as stuck. Set above full travel time.
-      default: 75
+      default: 35
       selector:
         number:
           min: 15
@@ -208,6 +221,8 @@ variables:
     {% if trigger.id == 'announce' %}{{ ann_ieee }}{% elif trigger.id == 'check' %}{{ (covers_info | selectattr('entity', 'eq', entity) | map(attribute='ieee') | first) | default('') }}{% endif %}
   name: >
     {{ (state_attr(entity, 'friendly_name') if entity else none) or ieee }}
+  z2m_name: >
+    {{ (device_attr(device_id(entity), 'name') if entity and device_id(entity) else '') or '' }}
 
 conditions:
   - condition: template
@@ -219,6 +234,7 @@ conditions:
           and trigger.event.data.get('source') == self_id
           and kind != 'stop_cover'
           and ieee != ''
+          and z2m_name != ''
           and target_pos >= 0
           and (start_pos - target_pos) | abs > 5)
          or (trigger.id == 'announce'
@@ -247,6 +263,7 @@ actions:
   # === 2. CHECK: wait for the blind to reach the target =====================
   - variables:
       outcome: pending
+      check_start: "{{ now().timestamp() }}"
       deadline: "{{ now().timestamp() + (move_timeout | int) }}"
       recovered: true
   - if:
@@ -256,9 +273,8 @@ actions:
       - repeat:
           sequence:
             - wait_for_trigger:
-                - trigger: template
-                  value_template: >
-                    {{ ((state_attr(entity, 'current_position') | int(-1)) - target_pos) | abs <= 5 }}
+                - trigger: mqtt
+                  topic: "{{ base }}/{{ z2m_name }}"
                 - trigger: event
                   event_type: z2m_blind_watchdog
               timeout: "{{ [deadline - now().timestamp(), 0] | max }}"
@@ -266,7 +282,7 @@ actions:
             - variables:
                 outcome: >
                   {% if wait.trigger is none %}timeout
-                  {% elif wait.trigger.event is not defined %}reached
+                  {% elif wait.trigger.event is not defined %}{% set p = (wait.trigger.payload_json.position | default(-1000)) if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else -1000 %}{{ 'reached' if ((p | int(-1000)) - target_pos) | abs <= 5 and now().timestamp() > check_start + 1 else 'pending' }}
                   {% elif wait.trigger.event.data.get('entity') == entity
                        and wait.trigger.event.data.get('source') == self_id %}superseded
                   {% else %}pending{% endif %}
@@ -352,13 +368,13 @@ actions:
             {% if kind == 'open_cover' %}{{ {'state': 'OPEN'} | to_json }}{% elif kind == 'close_cover' %}{{ {'state': 'CLOSE'} | to_json }}{% else %}{{ {'position': target_pos} | to_json }}{% endif %}
       - variables:
           outcome: pending
+          check_start: "{{ now().timestamp() }}"
           deadline: "{{ now().timestamp() + (move_timeout | int) }}"
       - repeat:
           sequence:
             - wait_for_trigger:
-                - trigger: template
-                  value_template: >
-                    {{ ((state_attr(entity, 'current_position') | int(-1)) - target_pos) | abs <= 5 }}
+                - trigger: mqtt
+                  topic: "{{ base }}/{{ z2m_name }}"
                 - trigger: event
                   event_type: z2m_blind_watchdog
               timeout: "{{ [deadline - now().timestamp(), 0] | max }}"
@@ -366,7 +382,7 @@ actions:
             - variables:
                 outcome: >
                   {% if wait.trigger is none %}timeout
-                  {% elif wait.trigger.event is not defined %}reached
+                  {% elif wait.trigger.event is not defined %}{% set p = (wait.trigger.payload_json.position | default(-1000)) if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else -1000 %}{{ 'reached' if ((p | int(-1000)) - target_pos) | abs <= 5 and now().timestamp() > check_start + 1 else 'pending' }}
                   {% elif wait.trigger.event.data.get('entity') == entity
                        and wait.trigger.event.data.get('source') == self_id %}superseded
                   {% else %}pending{% endif %}
