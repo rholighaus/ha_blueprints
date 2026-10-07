@@ -310,7 +310,7 @@ action:
               {{ solar_high_now and current_reserve != throttle_reserve_pct }}
         sequence:
           - alias: "Periodic: solar high but reserve not raised — correct it"
-            service: number.set_value
+            action: number.set_value
             target:
               entity_id: !input backup_reserve_number
             data:
@@ -319,7 +319,7 @@ action:
               - condition: template
                 value_template: "{{ operation_mode_select not in ['', none] and current_mode != 'self_consumption' }}"
             then:
-              - service: select.select_option
+              - action: select.select_option
                 target:
                   entity_id: !input operation_mode_select
                 data:
@@ -335,7 +335,7 @@ action:
             value_template: "{{ not octopus_cheap_rate_active }}"
         sequence:
           - alias: "Periodic: solar low but reserve not restored — correct it"
-            service: number.set_value
+            action: number.set_value
             target:
               entity_id: !input backup_reserve_number
             data:
@@ -344,7 +344,7 @@ action:
               - condition: template
                 value_template: "{{ operation_mode_select not in ['', none] and current_mode != 'autonomous' }}"
             then:
-              - service: select.select_option
+              - action: select.select_option
                 target:
                   entity_id: !input operation_mode_select
                 data:
@@ -355,7 +355,7 @@ action:
             id: solar_high
         sequence:
           - alias: "Raise reserve — solar genuinely high"
-            service: number.set_value
+            action: number.set_value
             target:
               entity_id: !input backup_reserve_number
             data:
@@ -364,7 +364,7 @@ action:
               - condition: template
                 value_template: "{{ operation_mode_select not in ['', none] }}"
             then:
-              - service: select.select_option
+              - action: select.select_option
                 target:
                   entity_id: !input operation_mode_select
                 data:
@@ -373,7 +373,7 @@ action:
               - condition: template
                 value_template: "{{ notify_service != '' }}"
             then:
-              - service: "{{ notify_service }}"
+              - action: "{{ notify_service }}"
                 data:
                   title: "{{ phase_name }}: reserve raised to {{ throttle_reserve_pct }}%"
                   message: >
@@ -390,7 +390,7 @@ action:
             value_template: "{{ not octopus_cheap_rate_active }}"
         sequence:
           - alias: "Restore reserve — solar sustainably low"
-            service: number.set_value
+            action: number.set_value
             target:
               entity_id: !input backup_reserve_number
             data:
@@ -399,7 +399,7 @@ action:
               - condition: template
                 value_template: "{{ operation_mode_select not in ['', none] }}"
             then:
-              - service: select.select_option
+              - action: select.select_option
                 target:
                   entity_id: !input operation_mode_select
                 data:
@@ -408,7 +408,7 @@ action:
               - condition: template
                 value_template: "{{ notify_service != '' }}"
             then:
-              - service: "{{ notify_service }}"
+              - action: "{{ notify_service }}"
                 data:
                   title: "{{ phase_name }}: reserve restored to {{ normal_reserve_pct }}%"
                   message: >
@@ -421,7 +421,7 @@ action:
             id: sunset
         sequence:
           - alias: "Sunset — hand off to autonomous/Octopus overnight optimisation"
-            service: number.set_value
+            action: number.set_value
             target:
               entity_id: !input backup_reserve_number
             data:
@@ -430,7 +430,7 @@ action:
               - condition: template
                 value_template: "{{ operation_mode_select not in ['', none] }}"
             then:
-              - service: select.select_option
+              - action: select.select_option
                 target:
                   entity_id: !input operation_mode_select
                 data:

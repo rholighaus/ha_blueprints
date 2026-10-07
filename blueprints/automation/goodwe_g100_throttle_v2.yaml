@@ -27,7 +27,7 @@ blueprint:
       cut_10k = excess * rated_10k / (rated_10k + rated_6k)
       cut_6k  = excess * rated_6k  / (rated_10k + rated_6k)
 
-    Ramp logic (applied every 10 seconds):
+    Ramp logic (applied every 5 seconds):
       - When excess > 0: ramp DOWN both inverters at max max_ramp_down/cycle
       - When excess <= 0: ramp UP both inverters at max max_ramp_up/cycle
       - Never jumps instantly in either direction
@@ -53,10 +53,6 @@ blueprint:
       - One input_boolean to enable/disable throttling
       - One input_boolean for load dispatch signalling (optional)
       - One timer for dispatch release delay (optional)
-
-    Future improvement:
-      When the FoxESS on Phase A/B is replaced with a GoodWe 6kW, this
-      blueprint can be used for those phases too.
 
   domain: automation
   source_url: https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/goodwe_g100_throttle_v2.yaml
@@ -252,7 +248,7 @@ blueprint:
     max_ramp_down:
       name: Ramp Down Speed (permille per cycle)
       description: >
-        Maximum throttle reduction per 10-second cycle.
+        Maximum throttle reduction per 5-second cycle.
         200 = drop up to 2kW per cycle on a 10kW inverter.
       default: 200
       selector:
@@ -265,7 +261,7 @@ blueprint:
     max_ramp_up:
       name: Ramp Up Speed (permille per cycle)
       description: >
-        Maximum throttle increase per 10-second cycle.
+        Maximum throttle increase per 5-second cycle.
         Keep this LOW to avoid voltage spikes on ramp-up.
         50 = increase by 0.5kW per cycle on a 10kW inverter.
       default: 50
@@ -333,7 +329,7 @@ trigger:
     seconds: "/5"
     id: periodic
   - platform: homeassistant
-    event: start
+    event_type: start
     id: ha_start
   - platform: sun
     event: sunset
@@ -399,20 +395,20 @@ action:
               safety_target_start_w: "{{ g100_limit_w * (1 - safety_margin_pct / 100) }}"
               start_permille_10k: "{{ 1000 if predicted_start_w <= safety_target_start_w else current_10k | int }}"
               start_permille_6k: "{{ 1000 if predicted_start_w <= safety_target_start_w else current_6k | int }}"
-          - service: input_number.set_value
+          - action: input_number.set_value
             target:
               entity_id: !input current_limit_helper_10k
             data:
               value: "{{ start_permille_10k }}"
-          - service: input_number.set_value
+          - action: input_number.set_value
             target:
               entity_id: !input current_limit_helper_6k
             data:
               value: "{{ start_permille_6k }}"
-          - service: "shell_command.{{ shell_command_10k }}"
+          - action: "shell_command.{{ shell_command_10k }}"
             data:
               value: "{{ start_permille_10k }}"
-          - service: "shell_command.{{ shell_command_6k }}"
+          - action: "shell_command.{{ shell_command_6k }}"
             data:
               value: "{{ start_permille_6k }}"
 
@@ -429,17 +425,17 @@ action:
               - condition: template
                 value_template: "{{ load_dispatch_switch not in ['', none] }}"
             then:
-              - service: homeassistant.turn_off
+              - action: homeassistant.turn_off
                 target:
                   entity_id: "{{ load_dispatch_switch }}"
 
-      # Periodic: run every 10 seconds between sunrise and sunset
+      # Periodic: run every 5 seconds between sunrise and sunset
       - conditions:
           - condition: trigger
             id: periodic
           - condition: sun
-            after: sunrise
-            before: sunset
+            after_sunrise: true
+            before_sunset: true
         sequence:
           - variables:
               current_10k: >
@@ -515,22 +511,22 @@ action:
                      0] | max, 1000] | min | int }}
 
           # Always write 10kW inverter (ensures register stays in sync with helper)
-          - service: input_number.set_value
+          - action: input_number.set_value
             target:
               entity_id: !input current_limit_helper_10k
             data:
               value: "{{ new_permille_10k }}"
-          - service: "shell_command.{{ shell_command_10k }}"
+          - action: "shell_command.{{ shell_command_10k }}"
             data:
               value: "{{ new_permille_10k }}"
 
           # Always write 6kW inverter (ensures register stays in sync with helper)
-          - service: input_number.set_value
+          - action: input_number.set_value
             target:
               entity_id: !input current_limit_helper_6k
             data:
               value: "{{ new_permille_6k }}"
-          - service: "shell_command.{{ shell_command_6k }}"
+          - action: "shell_command.{{ shell_command_6k }}"
             data:
               value: "{{ new_permille_6k }}"
 
@@ -548,7 +544,7 @@ action:
                           {{ new_permille_10k < (load_dispatch_lower_threshold_pct * 10)
                              or new_permille_6k < (load_dispatch_lower_threshold_pct * 10) }}
                     sequence:
-                      - service: homeassistant.turn_on
+                      - action: homeassistant.turn_on
                         target:
                           entity_id: "{{ load_dispatch_switch }}"
                       - if:
@@ -556,7 +552,7 @@ action:
                             value_template: >
                               {{ load_dispatch_release_timer not in ['', none] }}
                         then:
-                          - service: timer.cancel
+                          - action: timer.cancel
                             target:
                               entity_id: "{{ load_dispatch_release_timer }}"
 
@@ -574,7 +570,7 @@ action:
                               {{ load_dispatch_release_timer not in ['', none]
                                  and not is_state(load_dispatch_release_timer, 'active') }}
                         then:
-                          - service: timer.start
+                          - action: timer.start
                             target:
                               entity_id: "{{ load_dispatch_release_timer }}"
                         else:
@@ -583,7 +579,7 @@ action:
                                 value_template: >
                                   {{ load_dispatch_release_timer in ['', none] }}
                             then:
-                              - service: homeassistant.turn_off
+                              - action: homeassistant.turn_off
                                 target:
                                   entity_id: "{{ load_dispatch_switch }}"
 
@@ -597,7 +593,7 @@ action:
                              and (new_permille_10k < (load_dispatch_upper_threshold_pct * 10)
                                   or new_permille_6k < (load_dispatch_upper_threshold_pct * 10)) }}
                     sequence:
-                      - service: timer.cancel
+                      - action: timer.cancel
                         target:
                           entity_id: "{{ load_dispatch_release_timer }}"
 
@@ -610,13 +606,13 @@ action:
               - condition: template
                 value_template: "{{ load_dispatch_switch not in ['', none] }}"
             then:
-              - service: homeassistant.turn_off
+              - action: homeassistant.turn_off
                 target:
                   entity_id: "{{ load_dispatch_switch }}"
           - if:
               - condition: template
                 value_template: "{{ load_dispatch_release_timer not in ['', none] }}"
             then:
-              - service: timer.cancel
+              - action: timer.cancel
                 target:
                   entity_id: "{{ load_dispatch_release_timer }}"
