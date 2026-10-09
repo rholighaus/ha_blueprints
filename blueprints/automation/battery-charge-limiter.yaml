@@ -1,0 +1,169 @@
+# =============================================================================
+# battery-charge-limiter.yaml
+#
+# v1.0
+#
+# Design:
+#   Keeps a device's battery inside a charge window (default 20-80%) by
+#   toggling the switch feeding its charger. Unlike
+#   poe-battery-charge-limiter.yaml, this also guards against the charger
+#   switch changing state outside HA's control (power failure, plug reboot,
+#   manual toggle): the switch has no power-on behaviour setting, so every
+#   state change is re-checked and an "on" at/above upper_soc is reverted.
+#
+#   Triggers:
+#     - SoC below lower_soc             -> on
+#     - SoC >= upper_soc                -> off
+#     - charger switch state change     -> on while SoC >= upper (or SoC
+#                                          unreadable) -> off; back from
+#                                          unavailable/unknown as off while
+#                                          SoC < lower -> on
+#     - every 5 min (backstop)          -> on while SoC >= upper or
+#                                          unreadable -> off
+#     - HA start / manual run (default) -> full resync
+#
+#   Fail-safe direction: an unreadable SoC is treated as full - charger
+#   off rather than left charging blind.
+#
+# Before relying on this:
+#   - iCloud3 SoC sensors refresh ~15 min at home; expect overshoot past
+#     upper_soc while fast-charging. Lower upper_soc if that matters.
+#
+# Instances:
+#   - iPhone 12mini: sensor.12mini_battery / switch.usb_charger_ralfs_room_center
+# =============================================================================
+
+blueprint:
+  name: Battery Charge Limiter (switched charger)
+  description: >
+    Turns a charger switch on below a lower SoC and off at an upper SoC, and
+    re-checks on every charger state change (power failure, reboot, manual
+    toggle) so the battery is never charged past the upper SoC.
+  domain: automation
+  source_url: https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/battery-charge-limiter.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    soc_sensor:
+      name: Battery SoC sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: battery
+    charger_switch:
+      name: Charger switch
+      selector:
+        entity:
+          domain: switch
+    lower_soc:
+      name: Lower SoC (start charging below)
+      default: 20
+      selector:
+        number: { min: 1, max: 99, unit_of_measurement: "%", mode: slider }
+    upper_soc:
+      name: Upper SoC (stop charging at)
+      default: 80
+      selector:
+        number: { min: 1, max: 100, unit_of_measurement: "%", mode: slider }
+
+mode: queued
+max: 10
+max_exceeded: silent
+
+trigger_variables:
+  t_soc_sensor: !input soc_sensor
+  t_upper_soc: !input upper_soc
+
+variables:
+  soc_sensor: !input soc_sensor
+  charger_switch: !input charger_switch
+  lower_soc: !input lower_soc
+  upper_soc: !input upper_soc
+  soc_valid: "{{ is_number(states(soc_sensor)) }}"
+  soc: "{{ states(soc_sensor) | float(-1) }}"
+  full_or_unknown: "{{ (not soc_valid) or soc >= upper_soc }}"
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input soc_sensor
+    below: !input lower_soc
+    id: low
+  - trigger: template
+    value_template: "{{ states(t_soc_sensor) | float(-1) >= t_upper_soc | float(100) }}"
+    id: high
+  - trigger: state
+    entity_id: !input charger_switch
+    to: ~   # any state change, ignore attribute-only updates
+    id: charger_changed
+  - trigger: time_pattern
+    minutes: "/5"
+    id: periodic
+  - trigger: homeassistant
+    event: start
+
+conditions: []
+
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: low
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: !input charger_switch
+
+      - conditions:
+          - condition: trigger
+            id: high
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input charger_switch
+
+      - conditions:
+          - condition: trigger
+            id: charger_changed
+        sequence:
+          - variables:
+              from_s: "{{ trigger.from_state.state if trigger.from_state else 'unknown' }}"
+              to_s: "{{ trigger.to_state.state if trigger.to_state else 'unknown' }}"
+          - choose:
+              - conditions:
+                  - "{{ to_s == 'on' and full_or_unknown }}"
+                sequence:
+                  - action: switch.turn_off
+                    target:
+                      entity_id: !input charger_switch
+              - conditions:
+                  - "{{ from_s in ['unavailable', 'unknown'] and to_s == 'off'
+                        and soc_valid and soc < lower_soc }}"
+                sequence:
+                  - action: switch.turn_on
+                    target:
+                      entity_id: !input charger_switch
+
+      - conditions:
+          - condition: trigger
+            id: periodic
+          - "{{ is_state(charger_switch, 'on') and full_or_unknown }}"
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input charger_switch
+
+    default:
+      # HA start or manual/no-context run (see poe-battery-charge-limiter v1.1)
+      - if:
+          - "{{ full_or_unknown }}"
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id: !input charger_switch
+        else:
+          - if:
+              - "{{ soc < lower_soc }}"
+            then:
+              - action: switch.turn_on
+                target:
+                  entity_id: !input charger_switch
