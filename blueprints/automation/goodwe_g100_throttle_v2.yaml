@@ -434,8 +434,8 @@ action:
           - condition: trigger
             id: periodic
           - condition: sun
-            after_sunrise: true
-            before_sunset: true
+            after: sunrise
+            before: sunset
         sequence:
           - variables:
               current_10k: >
