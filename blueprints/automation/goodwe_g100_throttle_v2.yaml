@@ -329,7 +329,7 @@ trigger:
     seconds: "/5"
     id: periodic
   - platform: homeassistant
-    event_type: start
+    event: start
     id: ha_start
   - platform: sun
     event: sunset
