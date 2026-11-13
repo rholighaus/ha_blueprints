@@ -1,7 +1,7 @@
 # =============================================================================
 # z2m-reconfigure-on-rejoin.yaml
 #
-# v3.1
+# v3.2
 #
 # Design:
 #   Some Tuya TS0601 battery blind motors (Zemismart ZM25RX-08/30,
@@ -27,13 +27,17 @@
 #      - skipped if kind is stop_cover, or the blind is already within +-5
 #        of the target (avoids daily reconfigures from timed automations).
 #      - healthy = the blind's own Z2M state message (<base>/<friendly
-#        name>) reports position within +-5 of target, at least 1 s after
-#        the check started (skips Z2M's optimistic echo), within
-#        move_timeout (default 35 s; measured full travel ~19 s). A report
-#        that doesn't reach the target (bogus value) counts as STUCK.
-#        Residual gap: an unrelated message from a stuck blind (e.g. a
-#        battery report) after a set_cover_position would echo the cached
-#        optimistic target and count as reached.
+#        name>) reports position within +-5 of target AND its last_seen is
+#        no earlier than 2 s before the check started, within move_timeout
+#        (default 35 s; measured full travel ~19 s). Z2M only advances
+#        last_seen when the DEVICE sends something, so its optimistic echo
+#        of a set_cover_position (target written into position, old
+#        last_seen) is ignored. The 2 s allows for last_seen's 1 s
+#        resolution and Z2M/HA clock skew. Messages without last_seen fall
+#        back to "at least 1 s after check start" (v3.1 rule).
+#        A report that doesn't reach the target (bogus value) = STUCK.
+#        Residual gap: a stuck blind that sent something in the 2 s before
+#        the command, followed by an echo, would count as reached.
 #      - a newer command or a stop for the same blind supersedes the check
 #        (the newer command starts its own check), so Stop and quick
 #        reversals never cause a re-send.
@@ -72,12 +76,19 @@
 #          Blinds"). Messages within 1 s of the check starting are ignored.
 #          Default move_timeout 75 -> 35 s (measured full travel ~19 s,
 #          Ralf left blind). Inputs unchanged.
+#     v3.2 (2026-11-13) freshness judged by payload last_seen instead of a
+#          1 s window. v3.1 false alarm: both blinds opened together; the
+#          left arrived at 06:59:20.614, "Sync Ralf's Blinds" sent the right
+#          set_cover_position 100 at .616 (right still showed 0), and the
+#          right's REAL arrival report at .660 fell inside the 1 s window,
+#          was discarded, and the check timed out -> configure + re-send +
+#          "still stuck" push for a blind that was fully open.
 # =============================================================================
 
 blueprint:
-  name: Z2M – recover stuck blinds (reconfigure + resend) (v3.1)
+  name: Z2M – recover stuck blinds (reconfigure + resend) (v3.2)
   description: >
-    v3.1 — Watchdog for Zigbee2MQTT battery blind motors (e.g. Tuya TS0601)
+    v3.2 — Watchdog for Zigbee2MQTT battery blind motors (e.g. Tuya TS0601)
     that stop acting on commands until reconfigured. When a selected cover is
     commanded (open/close/set position) from HA and doesn't reach the target
     position within the timeout, sends a Z2M "configure" request and re-sends
@@ -282,7 +293,7 @@ actions:
             - variables:
                 outcome: >
                   {% if wait.trigger is none %}timeout
-                  {% elif wait.trigger.event is not defined %}{% set p = (wait.trigger.payload_json.position | default(-1000)) if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else -1000 %}{{ 'reached' if ((p | int(-1000)) - target_pos) | abs <= 5 and now().timestamp() > check_start + 1 else 'pending' }}
+                  {% elif wait.trigger.event is not defined %}{% set pj = wait.trigger.payload_json if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else {} %}{% set ls = pj.get('last_seen') %}{% if ls is number %}{% set fresh = ((ls / 1000) if ls > 100000000000 else ls) >= check_start - 2 %}{% elif ls is string and as_timestamp(ls, none) is not none %}{% set fresh = as_timestamp(ls) >= check_start - 2 %}{% else %}{% set fresh = now().timestamp() > check_start + 1 %}{% endif %}{% set p = (wait.trigger.payload_json.position | default(-1000)) if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else -1000 %}{{ 'reached' if ((p | int(-1000)) - target_pos) | abs <= 5 and fresh else 'pending' }}
                   {% elif wait.trigger.event.data.get('entity') == entity
                        and wait.trigger.event.data.get('source') == self_id %}superseded
                   {% else %}pending{% endif %}
@@ -382,7 +393,7 @@ actions:
             - variables:
                 outcome: >
                   {% if wait.trigger is none %}timeout
-                  {% elif wait.trigger.event is not defined %}{% set p = (wait.trigger.payload_json.position | default(-1000)) if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else -1000 %}{{ 'reached' if ((p | int(-1000)) - target_pos) | abs <= 5 and now().timestamp() > check_start + 1 else 'pending' }}
+                  {% elif wait.trigger.event is not defined %}{% set pj = wait.trigger.payload_json if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else {} %}{% set ls = pj.get('last_seen') %}{% if ls is number %}{% set fresh = ((ls / 1000) if ls > 100000000000 else ls) >= check_start - 2 %}{% elif ls is string and as_timestamp(ls, none) is not none %}{% set fresh = as_timestamp(ls) >= check_start - 2 %}{% else %}{% set fresh = now().timestamp() > check_start + 1 %}{% endif %}{% set p = (wait.trigger.payload_json.position | default(-1000)) if wait.trigger.payload_json is defined and wait.trigger.payload_json is mapping else -1000 %}{{ 'reached' if ((p | int(-1000)) - target_pos) | abs <= 5 and fresh else 'pending' }}
                   {% elif wait.trigger.event.data.get('entity') == entity
                        and wait.trigger.event.data.get('source') == self_id %}superseded
                   {% else %}pending{% endif %}
