@@ -1,7 +1,8 @@
 HA_PATH  := /config/blueprints/automation/rholighaus
-HA_URL   := http://homeassistant.local:8123
+# Overridable: make sync-to-ha HA_URL=... HA_SSH=...  (the IP works on VPN, mDNS names may not)
+HA_URL   ?= http://10.27.3.10:8123
 HA_TOKEN ?= $(shell cat ~/.ha_token 2>/dev/null | tr -d '[:space:]')
-HA_SSH   := root@homeassistant.local
+HA_SSH   ?= root@homeassistant.local
 
 # Automation IDs that use rholighaus blueprints — must be re-saved after any blueprint update
 # because HA does not recompile blueprint instances unless their stored config changes.
@@ -44,19 +45,27 @@ sync-to-ha:
 # ── Re-save all blueprint automation instances ────────────────────────────────
 # HA does not recompile blueprint instances on restart unless their stored
 # config changes. After any blueprint update, instances must be re-saved.
+# NOTE: the REST config endpoint is keyed by the automation's config `id`
+# (the `id` attribute on its state, e.g. 1777456843410), NOT the entity_id slug.
+# The old loop used the slug, so the GET 404'd and the 404 body was POSTed back (HTTP 400).
 resave-automations:
 	@if [ -z "$(HA_TOKEN)" ]; then \
 		echo "Error: ~/.ha_token not found or empty"; exit 1; \
 	fi
 	@echo "Re-saving blueprint automation instances..."
 	@for id in $(BLUEPRINT_AUTOMATION_IDS); do \
-		config=$$(curl -s -X GET "$(HA_URL)/api/config/automation/config/$${id#automation.}" \
+		uid=$$(curl -s "$(HA_URL)/api/states/$$id" -H "Authorization: Bearer $(HA_TOKEN)" \
+			| python3 -c "import sys,json; print(json.load(sys.stdin)['attributes']['id'])" 2>/dev/null); \
+		if [ -z "$$uid" ]; then echo "  ✗ $$id (no config id: not found or YAML-defined)"; continue; fi; \
+		get_code=$$(curl -s -o /tmp/resave_cfg.json -w "%{http_code}" \
+			"$(HA_URL)/api/config/automation/config/$$uid" \
 			-H "Authorization: Bearer $(HA_TOKEN)"); \
+		if [ "$$get_code" != "200" ]; then echo "  ✗ $$id (GET $$get_code)"; continue; fi; \
 		resave_code=$$(curl -s -o /tmp/resave_out.txt -w "%{http_code}" \
-			-X POST "$(HA_URL)/api/config/automation/config/$${id#automation.}" \
+			-X POST "$(HA_URL)/api/config/automation/config/$$uid" \
 			-H "Authorization: Bearer $(HA_TOKEN)" \
 			-H "Content-Type: application/json" \
-			-d "$$config"); \
+			--data-binary @/tmp/resave_cfg.json); \
 		echo "  ↺ $$id ($$resave_code)"; \
 	done
 
