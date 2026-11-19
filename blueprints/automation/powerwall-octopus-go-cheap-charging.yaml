@@ -4,6 +4,14 @@ blueprint:
     For multiple Teslemetry-linked Powerwall sites, charge from grid while the
     current Octopus rate is cheaper than the next rate. Automatically constructs
     and controls each site's backup-reserve number and grid-charge switch.
+
+    **Version: 1.1**
+
+    New in 1.1: after the cheap window, each site's reserve is restored to
+    input_number.<site>_normal_backup_reserve when that helper exists and is
+    numeric (e.g. input_number.the_grange_b_normal_backup_reserve for site
+    the_grange_b). Otherwise the normal_percent input is used, floored by
+    min_percent. The helper value is not floored: it enforces its own minimum.
   domain: automation
   author: "Ralf Holighaus"
   source_url: "https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/powerwall-octopus-go-cheap-charging.yaml"
@@ -37,6 +45,9 @@ blueprint:
           unit_of_measurement: "%"
     normal_percent:
       name: Normal backup reserve after cheap window
+      description: >
+        Fallback, used for a site only when it has no numeric
+        input_number.<site>_normal_backup_reserve helper.
       default: 20
       selector:
         number:
@@ -46,6 +57,9 @@ blueprint:
           unit_of_measurement: "%"
     min_percent:
       name: Minimum allowed reserve
+      description: >
+        Floor applied to the target and to the normal_percent fallback.
+        Not applied to a per-site helper value.
       default: 20
       selector:
         number:
@@ -109,7 +123,10 @@ action:
                   target:
                     entity_id: "number.{{ repeat.item }}_backup_reserve"
                   data:
-                    value: "{{ [normal_backup | int, min_backup | int] | max }}"
+                    value: >
+                      {% set h = 'input_number.' ~ repeat.item ~ '_normal_backup_reserve' -%}
+                      {{ (states(h) | float(0) | round(0) | int) if states(h) | is_number
+                         else ([normal_backup | int, min_backup | int] | max) }}
           - alias: Disable charge from grid
             repeat:
               for_each: "{{ sites }}"
