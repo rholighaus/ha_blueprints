@@ -26,7 +26,13 @@ blueprint:
     This covers both the fixed overnight Go window and any Intelligent dispatch
     slots during the day, preventing conflict with the Octopus charging automation.
 
-    **Version: 2.8**
+    **Version: 2.9**
+
+    New in 2.9: optional normal_reserve_helper input. Point it at an
+    input_number holding this battery's normal reserve % and the value lives
+    in one place (shared with other automations). If the helper is empty,
+    unavailable or non-numeric, the static normal_reserve_pct input is used.
+    Read at every run, so a change to the helper takes effect within a minute.
 
     New in 2.8: optional Tesla operation mode switching.
       - Solar high → self_consumption (prevents grid import to charge battery)
@@ -155,7 +161,8 @@ blueprint:
       name: "Reserve % when solar is low"
       description: >
         Backup reserve to restore when structural export drops below the
-        threshold. Set to your normal standby value (e.g. 20).
+        threshold. Set to your normal standby value (e.g. 20). Only used when
+        the normal reserve helper below is empty or unavailable.
       default: 20
       selector:
         number:
@@ -164,6 +171,18 @@ blueprint:
           step: 5
           unit_of_measurement: "%"
           mode: slider
+
+    normal_reserve_helper:
+      name: "Normal reserve helper (optional)"
+      description: >
+        An input_number holding this battery's normal reserve %, e.g.
+        input_number.the_grange_b_normal_backup_reserve. When set (and
+        numeric) it overrides "Reserve % when solar is low", so the value
+        can be changed in one place. Leave empty to use the static value.
+      default:
+      selector:
+        entity:
+          domain: input_number
 
     battery_power_sensor:
       name: "Battery Power Sensor (optional)"
@@ -238,7 +257,12 @@ variables:
   hold_switch: !input hold_switch
   operation_mode_select: !input operation_mode_select
   throttle_reserve_pct: !input throttle_reserve_pct
-  normal_reserve_pct: !input normal_reserve_pct
+  normal_reserve_static: !input normal_reserve_pct
+  normal_reserve_helper: !input normal_reserve_helper
+  normal_reserve_pct: >
+    {{ (states(normal_reserve_helper) | float(0) | round(0) | int)
+       if (normal_reserve_helper not in ['', none] and states(normal_reserve_helper) | is_number)
+       else normal_reserve_static }}
   notify_service: !input notify_service
   octopus_cheap_rate_active: >
     {{ states('sensor.octopus_energy_electricity_25j0223825_2000012019734_current_rate') | float(999)
