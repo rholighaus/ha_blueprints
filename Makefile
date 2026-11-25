@@ -11,7 +11,8 @@ BLUEPRINT_AUTOMATION_IDS := \
 	automation.grange_b_solar_battery_reserve \
 	automation.grange_c_solar_battery_reserve \
 	automation.octopus_go_tesla_optimisation \
-	automation.powerwall_backup_reserve_periodic_safety_reset
+	automation.powerwall_backup_reserve_periodic_safety_reset \
+	automation.pool_pump_scheduler_smart_dry_run
 # Note: automation.grange_{a,b,c}_charge_powerwall_when_throttling removed
 # 2026-07-20 — these entity IDs don't exist; the real automations for
 # charge-powerwall-when-throttling.yaml are the *_solar_battery_reserve ones above.

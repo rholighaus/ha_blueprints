@@ -1,0 +1,293 @@
+blueprint:
+  name: Pool Pump Scheduler (tariff + solar aware)
+  description: >
+    Fork of swingerman's Pool Pump Scheduler
+    (https://gist.github.com/swingerman/3dda78527397f8b27e00dbd60ab2dc7b),
+    extended to track a daily run-time budget and decide *when* to spend it.
+
+
+    Priority each minute:
+
+    1. Season toggle off → pump off.
+
+    2. Any "keep on" entity on (e.g. pool heating) → pump on.
+
+    3. Solar throttling active → pump on (free energy), up to the daily
+       target plus a configurable solar bonus.
+
+    4. Cheap-rate window active → pump on until the daily target is met.
+
+    5. Outside the cheap window → run turnover-length "day cycles", but only
+       for the part of the target NOT reserved for the cheap window. Cycles
+       are spaced evenly across the non-cheap part of the day.
+
+    6. Minimum run time prevents short-cycling when throttling flickers.
+
+
+    Requires a History Stats sensor (type: time, state: on) measuring the
+    pump's ON hours since the start of the "pump day". For the cheap-window
+    reserve to work, the pump day must start when the cheap window ends
+    (e.g. 05:30), so a night's cheap run counts toward the day that follows.
+
+
+    Dry run (default ON) evaluates everything but only updates a persistent
+    notification describing what it would have done.
+
+
+    **Version: 1.0**
+  domain: automation
+  author: Ralf Holighaus / Claude (based on swingerman)
+  source_url: https://github.com/rholighaus/ha_blueprints/blob/main/blueprints/automation/pool-pump-scheduler-smart.yaml
+  input:
+    pool_pump:
+      name: Pool Pump
+      description: The switch that controls the pool pump.
+      selector:
+        entity:
+          domain: switch
+    pool_volume:
+      name: Pool Volume
+      description: Pool volume. Use the same base unit as the flow rate.
+      selector:
+        number:
+          min: 1
+          max: 100000
+          unit_of_measurement: "gal/m3/l"
+          mode: box
+    pump_flow_rate:
+      name: Pump Flow Rate
+      description: Pump flow rate per hour. Use the same base unit as the volume.
+      selector:
+        number:
+          min: 0.5
+          max: 1000
+          step: 0.5
+          unit_of_measurement: "gph/m3ph/lph"
+          mode: box
+    maximum_run_time:
+      name: Daily Run-Time Target
+      description: Hours the pump should run per pump day.
+      default: 8
+      selector:
+        number:
+          min: 0
+          max: 24
+          step: 0.5
+          unit_of_measurement: hours
+          mode: slider
+    season_toggle:
+      name: Pool Season Toggle
+      description: When off, the pump is kept off.
+      selector:
+        entity:
+          domain:
+            - input_boolean
+            - switch
+    schedule_toggle:
+      name: Run Window Toggle (optional)
+      description: >
+        When set, new starts only happen while this is on (except "keep on"
+        entities). Leave empty if not needed.
+      default:
+      selector:
+        entity:
+          domain:
+            - input_boolean
+            - switch
+
+    runtime_today_sensor:
+      name: Run Time Today (History Stats sensor)
+      description: >
+        History Stats sensor (type: time) counting hours the pump has been ON
+        since the start of the pump day. Start the pump day when the cheap
+        window ends.
+      selector:
+        entity:
+          domain: sensor
+
+    cheap_rate_sensor:
+      name: Cheap-Rate Sensor (optional)
+      description: >
+        Binary sensor that is ON while electricity is cheap, e.g. the Octopus
+        Energy "off peak" sensor (which also covers Intelligent dispatch slots).
+        If empty, the fixed window below is used.
+      default:
+      selector:
+        entity:
+          domain: binary_sensor
+    cheap_window_start:
+      name: Cheap Window Start
+      description: >
+        Start of the cheap window. Used when no cheap-rate sensor is set, and
+        always used to space day cycles.
+      default: "23:30:00"
+      selector:
+        time: {}
+    cheap_window_end:
+      name: Cheap Window End
+      default: "05:30:00"
+      selector:
+        time: {}
+    cheap_reserved_hours:
+      name: Hours Reserved for Cheap Window
+      description: >
+        Part of the daily target held back for the cheap window. Day cycles
+        only run the remainder (target minus this). Set to 0 to disable the
+        cheap-rate preference.
+      default: 6
+      selector:
+        number:
+          min: 0
+          max: 24
+          step: 0.5
+          unit_of_measurement: hours
+          mode: slider
+
+    throttle_entities:
+      name: Solar Throttling Indicators (optional)
+      description: >
+        Entities that are ON while inverters are being throttled (e.g. the
+        GoodWe per-phase dispatch booleans). Any one ON counts.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          domain:
+            - input_boolean
+            - binary_sensor
+            - switch
+    solar_bonus_hours:
+      name: Solar Bonus Hours
+      description: >
+        Extra hours beyond the daily target the pump may run on throttled
+        (otherwise wasted) solar. Extra solar hours reduce the next cheap-window run.
+      default: 4
+      selector:
+        number:
+          min: 0
+          max: 24
+          step: 0.5
+          unit_of_measurement: hours
+          mode: slider
+
+    keep_on_entities:
+      name: Keep-On Entities (optional)
+      description: >
+        While any of these is ON the pump is kept on regardless of budget
+        (e.g. switch.pool_heating).
+      default: []
+      selector:
+        entity:
+          multiple: true
+          domain:
+            - input_boolean
+            - binary_sensor
+            - switch
+    min_run_minutes:
+      name: Minimum Run Time
+      description: Once started, the pump stays on at least this long.
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 120
+          unit_of_measurement: min
+          mode: slider
+    dry_run:
+      name: Dry Run
+      description: >
+        When on, nothing is switched; a persistent notification shows what
+        would have happened.
+      default: true
+      selector:
+        boolean: {}
+
+mode: single
+
+triggers:
+  - trigger: time_pattern
+    minutes: /1
+
+variables:
+  pump: !input pool_pump
+  volume: !input pool_volume
+  flow: !input pump_flow_rate
+  target_h: !input maximum_run_time
+  season: !input season_toggle
+  run_window: !input schedule_toggle
+  runtime_sensor: !input runtime_today_sensor
+  cheap_sensor: !input cheap_rate_sensor
+  cheap_start: !input cheap_window_start
+  cheap_end: !input cheap_window_end
+  reserved_h: !input cheap_reserved_hours
+  throttle_list: !input throttle_entities
+  bonus_h: !input solar_bonus_hours
+  keep_on_list: !input keep_on_entities
+  min_run_min: !input min_run_minutes
+  dry_run: !input dry_run
+
+  turnover_h: "{{ (volume | float(1)) / ([flow | float(1), 0.1] | max) }}"
+  runtime_h: "{{ states(runtime_sensor) | float(0) }}"
+  pump_on: "{{ is_state(pump, 'on') }}"
+  state_hours: >-
+    {{ ((now() - states[pump].last_changed).total_seconds() / 3600)
+       if states[pump] is not none else 0 }}
+  cheap_len_h: >-
+    {% set s = today_at(cheap_start) %}{% set e = today_at(cheap_end) %}
+    {{ ((e - s).total_seconds() / 3600) % 24 }}
+  in_cheap: >-
+    {% if cheap_sensor %}{{ is_state(cheap_sensor, 'on') }}
+    {% else %}
+      {% set s = today_at(cheap_start) %}{% set e = today_at(cheap_end) %}{% set n = now() %}
+      {{ (s <= n < e) if s <= e else (n >= s or n < e) }}
+    {% endif %}
+  throttling: >-
+    {% set l = throttle_list if throttle_list is list else ([throttle_list] if throttle_list else []) %}
+    {{ l | select('is_state', 'on') | list | count > 0 }}
+  keep_on: >-
+    {% set l = keep_on_list if keep_on_list is list else ([keep_on_list] if keep_on_list else []) %}
+    {{ l | select('is_state', 'on') | list | count > 0 }}
+  day_budget_h: "{{ [target_h | float(0) - reserved_h | float(0), 0] | max }}"
+  day_runs: "{{ [(day_budget_h / turnover_h) | round(0, 'ceil'), 1] | max }}"
+  day_gap_h: "{{ [(24 - cheap_len_h - day_budget_h) / (day_runs + 1), 0] | max }}"
+  min_run_ok: "{{ not pump_on or (state_hours * 60) >= (min_run_min | float(0)) }}"
+  reason: >-
+    {% if not is_state(season, 'on') %}season_off
+    {% elif keep_on %}keep_on
+    {% elif throttling and runtime_h < target_h | float(0) + bonus_h | float(0) %}solar_throttled
+    {% elif in_cheap and runtime_h < target_h | float(0) %}cheap_rate
+    {% elif not in_cheap and runtime_h < day_budget_h
+         and ((pump_on and state_hours < turnover_h)
+              or (not pump_on and state_hours >= day_gap_h)) %}day_cycle
+    {% elif pump_on and not min_run_ok %}min_run
+    {% else %}none{% endif %}
+  want_on: "{{ reason not in ['season_off', 'none'] }}"
+  start_allowed: "{{ not run_window or is_state(run_window, 'on') or reason == 'keep_on' }}"
+  action_needed: >-
+    {% if states(pump) not in ['on', 'off'] %}none
+    {% elif want_on and not pump_on and start_allowed %}on
+    {% elif not want_on and pump_on %}off
+    {% else %}none{% endif %}
+
+conditions:
+  - condition: template
+    value_template: "{{ action_needed != 'none' }}"
+
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ dry_run }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          notification_id: pool_pump_scheduler_dry_run
+          title: Pool pump scheduler (dry run)
+          message: >-
+            {{ now().strftime('%H:%M') }}: would turn {{ action_needed }} {{ pump }}
+            (reason: {{ reason }}; run today {{ runtime_h | round(2) }} h of
+            {{ target_h }} h; cheap={{ in_cheap }}; throttling={{ throttling }};
+            day budget {{ day_budget_h }} h, gap {{ day_gap_h | round(1) }} h)
+    else:
+      - action: "switch.turn_{{ action_needed }}"
+        target:
+          entity_id: "{{ pump }}"
